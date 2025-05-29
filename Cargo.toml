@@ -3,6 +3,11 @@ name = "distributed-gc-sidecar"
 version = "0.1.0"
 edition = "2021"
 
+# Add lib section to make the crate available for integration tests
+[lib]
+name = "distributed_gc_sidecar"
+path = "src/lib.rs"
+
 [dependencies]
 # gRPC and protobuf
 tonic = "0.12"
@@ -36,8 +41,8 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 # Configuration
 config = "0.14"
 
-# Database (optional, for persistent storage)
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono"], optional = true }
+# Database (with postgres feature enabled by default)
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"], optional = true }
 
 # Metrics
 prometheus = "0.13"
@@ -68,25 +73,27 @@ tonic = { version = "0.12", features = ["transport"] }
 pretty_assertions = "1.4"
 serial_test = "3.0"  # For tests that need to run sequentially
 
-# Performance testing (optional)
+# Performance testing
 criterion = { version = "0.5", features = ["html_reports"] }
-
-[[test]]
-name = "integration"
-path = "tests/integration_test.rs"
-
-[[bench]]
-name = "gc_benchmarks"
-harness = false
-
 
 [build-dependencies]
 tonic-build = "0.12"
 
 [features]
-default = []
+# Enable postgres by default, make it optional for builds without database
+default = ["postgres"]
 postgres = ["sqlx"]
 
 [[bin]]
 name = "gc-sidecar"
 path = "src/main.rs"
+
+# Integration tests
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+# Benchmarks
+[[bench]]
+name = "gc_benchmarks"
+harness = false
