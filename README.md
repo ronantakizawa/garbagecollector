@@ -4,38 +4,6 @@ A high-performance, lease-based distributed garbage collection system for micros
 
 ![ChatGPT Image May 29, 2025, 03_51_31 PM](https://github.com/user-attachments/assets/f8a018ba-fc0e-41b0-b022-b704a0049dc3)
 
-## 📦 Use Cases 
-
-### 1. Cross-Service Object Lifecycle Management
-
-**Scenario**: Microservices (e.g., A, B, C) share object references (e.g., DB rows, blobs).  
-**Problem**: No centralized way to detect when an object is no longer needed.  
-**Solution**: Garbage Truck issues time-boxed leases. When all expire, the object is reclaimed automatically.
-
-### 2. Temporary Resource Cleanup
-
-**Scenario**: APIs or batch jobs generate temporary files or cache entries.  
-**Problem**: Orphaned resources accumulate and consume disk/memory.  
-**Solution**: Register objects with leases; Garbage Truck deletes them after expiration.
-
-### 3. Session and Connection Expiry
-
-**Scenario**: Applications maintain WebSocket or user sessions.  
-**Problem**: Sessions remain active after user disconnects or crashes.  
-**Solution**: Lease expires on inactivity, and the GC closes connections or cleans up session state.
-
-### 4. Database Row TTL Enforcement
-
-**Scenario**: Temporary data (e.g., carts, ephemeral records) stored in a database.  
-**Problem**: Old data persists without cleanup, bloating the DB.  
-**Solution**: Associate each row with a lease; expired leases trigger deletion.
-
-### 5. Blob/Object Storage Cleanup
-
-**Scenario**: Services upload files to S3, Azure Blob, etc.  
-**Problem**: No tracking of file usage lifecycle across services.  
-**Solution**: Attach leases to object IDs and clean up expired blobs automatically.
-
 ## 🎯 Features
 
 ### Core Functionality
@@ -94,6 +62,38 @@ A high-performance, lease-based distributed garbage collection system for micros
                     │ • Custom Handlers         │
                     └───────────────────────────┘
 ```
+
+## 📦 Use Cases 
+
+### 1. Cross-Service Object Lifecycle Management
+
+**Scenario**: Microservices (e.g., A, B, C) share object references (e.g., DB rows, blobs).  
+**Problem**: No centralized way to detect when an object is no longer needed.  
+**Solution**: Garbage Truck issues time-boxed leases. When all expire, the object is reclaimed automatically.
+
+### 2. Temporary Resource Cleanup
+
+**Scenario**: APIs or batch jobs generate temporary files or cache entries.  
+**Problem**: Orphaned resources accumulate and consume disk/memory.  
+**Solution**: Register objects with leases; Garbage Truck deletes them after expiration.
+
+### 3. Session and Connection Expiry
+
+**Scenario**: Applications maintain WebSocket or user sessions.  
+**Problem**: Sessions remain active after user disconnects or crashes.  
+**Solution**: Lease expires on inactivity, and the GC closes connections or cleans up session state.
+
+### 4. Database Row TTL Enforcement
+
+**Scenario**: Temporary data (e.g., carts, ephemeral records) stored in a database.  
+**Problem**: Old data persists without cleanup, bloating the DB.  
+**Solution**: Associate each row with a lease; expired leases trigger deletion.
+
+### 5. Blob/Object Storage Cleanup
+
+**Scenario**: Services upload files to S3, Azure Blob, etc.  
+**Problem**: No tracking of file usage lifecycle across services.  
+**Solution**: Attach leases to object IDs and clean up expired blobs automatically.
 
 ## 🚀 Quick Start
 
