@@ -1,0 +1,170 @@
+syntax = "proto3";
+
+package distributed_gc;
+
+import "google/protobuf/timestamp.proto";
+
+// Main garbage collection service
+service DistributedGCService {
+    // Create a lease for an object reference
+    rpc CreateLease(CreateLeaseRequest) returns (CreateLeaseResponse);
+    
+    // Renew an existing lease
+    rpc RenewLease(RenewLeaseRequest) returns (RenewLeaseResponse);
+    
+    // Release a lease (explicit cleanup)
+    rpc ReleaseLease(ReleaseLeaseRequest) returns (ReleaseLeaseResponse);
+    
+    // Get lease information
+    rpc GetLease(GetLeaseRequest) returns (GetLeaseResponse);
+    
+    // List all leases (for debugging/monitoring)
+    rpc ListLeases(ListLeasesRequest) returns (ListLeasesResponse);
+    
+    // Health check
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+    
+    // Metrics endpoint
+    rpc GetMetrics(MetricsRequest) returns (MetricsResponse);
+}
+
+// Empty request messages
+message HealthCheckRequest {}
+message MetricsRequest {}
+
+// Object types that can be managed
+enum ObjectType {
+    UNKNOWN = 0;
+    DATABASE_ROW = 1;
+    BLOB_STORAGE = 2;
+    TEMPORARY_FILE = 3;
+    WEBSOCKET_SESSION = 4;
+    CACHE_ENTRY = 5;
+    CUSTOM = 6;
+}
+
+// Lease state
+enum LeaseState {
+    ACTIVE = 0;
+    EXPIRED = 1;
+    RELEASED = 2;
+}
+
+// Create lease request
+message CreateLeaseRequest {
+    string object_id = 1;
+    ObjectType object_type = 2;
+    string service_id = 3;
+    uint64 lease_duration_seconds = 4;
+    map<string, string> metadata = 5;
+    
+    // Custom cleanup configuration
+    CleanupConfig cleanup_config = 6;
+}
+
+message CleanupConfig {
+    // gRPC endpoint to call for cleanup
+    string cleanup_endpoint = 1;
+    
+    // HTTP endpoint for cleanup (alternative to gRPC)
+    string cleanup_http_endpoint = 2;
+    
+    // Custom cleanup payload
+    string cleanup_payload = 3;
+    
+    // Retry configuration
+    uint32 max_retries = 4;
+    uint64 retry_delay_seconds = 5;
+}
+
+message CreateLeaseResponse {
+    string lease_id = 1;
+    google.protobuf.Timestamp expires_at = 2;
+    bool success = 3;
+    string error_message = 4;
+}
+
+// Renew lease request
+message RenewLeaseRequest {
+    string lease_id = 1;
+    string service_id = 2;
+    uint64 extend_duration_seconds = 3;
+}
+
+message RenewLeaseResponse {
+    google.protobuf.Timestamp new_expires_at = 1;
+    bool success = 2;
+    string error_message = 3;
+}
+
+// Release lease request
+message ReleaseLeaseRequest {
+    string lease_id = 1;
+    string service_id = 2;
+}
+
+message ReleaseLeaseResponse {
+    bool success = 1;
+    string error_message = 2;
+}
+
+// Get lease request
+message GetLeaseRequest {
+    string lease_id = 1;
+}
+
+message GetLeaseResponse {
+    LeaseInfo lease = 1;
+    bool found = 2;
+}
+
+// List leases request
+message ListLeasesRequest {
+    string service_id = 1; // Filter by service ID
+    ObjectType object_type = 2; // Filter by object type
+    LeaseState state = 3; // Filter by state
+    uint32 limit = 4;
+    string page_token = 5;
+}
+
+message ListLeasesResponse {
+    repeated LeaseInfo leases = 1;
+    string next_page_token = 2;
+}
+
+// Lease information
+message LeaseInfo {
+    string lease_id = 1;
+    string object_id = 2;
+    ObjectType object_type = 3;
+    string service_id = 4;
+    LeaseState state = 5;
+    google.protobuf.Timestamp created_at = 6;
+    google.protobuf.Timestamp expires_at = 7;
+    google.protobuf.Timestamp last_renewed_at = 8;
+    map<string, string> metadata = 9;
+    CleanupConfig cleanup_config = 10;
+    uint32 renewal_count = 11;
+}
+
+// Health check response
+message HealthCheckResponse {
+    bool healthy = 1;
+    string version = 2;
+    uint64 active_leases = 3;
+    uint64 expired_leases = 4;
+    google.protobuf.Timestamp uptime = 5;
+}
+
+// Metrics response
+message MetricsResponse {
+    uint64 total_leases_created = 1;
+    uint64 total_leases_renewed = 2;
+    uint64 total_leases_expired = 3;
+    uint64 total_leases_released = 4;
+    uint64 total_cleanup_operations = 5;
+    uint64 failed_cleanup_operations = 6;
+    uint64 active_leases = 7;
+    map<string, uint64> leases_by_service = 8;
+    map<string, uint64> leases_by_type = 9;
+}

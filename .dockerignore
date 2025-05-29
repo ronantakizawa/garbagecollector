@@ -1,0 +1,54 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+*.pdb
+
+# Git
+.git/
+.gitignore
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test files
+test_*.sh
+*_test.sh
+comprehensive_test.sh
+simple_test.sh
+benchmark.sh
+
+# Documentation
+README.md
+*.md
+
+# Examples
+examples/
+
+# Temporary files
+*.tmp
+/tmp/
+
+# Docker files (avoid recursion)
+Dockerfile*
+docker-compose*.yml
+
+# Local development files
+.env*
+.local
+
+# Python cache (if any)
+__pycache__/
+*.pyc
+
+# Node modules (if any)
+node_modules/

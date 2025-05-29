@@ -1,0 +1,175 @@
+version: '3.8'
+
+services:
+  # Distributed GC Sidecar Service
+  gc-sidecar:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    ports:
+      - "50051:50051"  # gRPC port
+      - "9090:9090"    # Metrics port
+    environment:
+      # Server configuration
+      - GC_SERVER_HOST=0.0.0.0
+      - GC_SERVER_PORT=50051
+      
+      # GC configuration
+      - GC_DEFAULT_LEASE_DURATION=300      # 5 minutes
+      - GC_MAX_LEASE_DURATION=3600         # 1 hour
+      - GC_MIN_LEASE_DURATION=30           # 30 seconds
+      - GC_CLEANUP_INTERVAL=60             # 1 minute
+      - GC_CLEANUP_GRACE_PERIOD=30         # 30 seconds
+      - GC_MAX_LEASES_PER_SERVICE=10000
+      
+      # Storage configuration (use memory for Docker demo)
+      - GC_STORAGE_BACKEND=memory
+      
+      # Cleanup configuration
+      - GC_CLEANUP_TIMEOUT=30
+      - GC_CLEANUP_MAX_RETRIES=3
+      - GC_CLEANUP_RETRY_DELAY=5
+      
+      # Metrics configuration
+      - GC_METRICS_ENABLED=true
+      - GC_METRICS_PORT=9090
+      
+      # Logging
+      - RUST_LOG=distributed_gc_sidecar=info
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - gc-network
+
+  # PostgreSQL Database (optional, for persistence)
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=distributed_gc
+      - POSTGRES_USER=gcuser
+      - POSTGRES_PASSWORD=gcpass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gcuser -d distributed_gc"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - gc-network
+    profiles:
+      - postgres
+
+  # GC Sidecar with PostgreSQL backend
+  gc-sidecar-postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "50052:50051"  # Different port to avoid conflicts
+      - "9091:9090"    # Different metrics port
+    environment:
+      - GC_SERVER_HOST=0.0.0.0
+      - GC_SERVER_PORT=50051
+      - GC_STORAGE_BACKEND=postgres
+      - DATABASE_URL=postgresql://gcuser:gcpass@postgres:5432/distributed_gc
+      - GC_MAX_DB_CONNECTIONS=10
+      - RUST_LOG=distributed_gc_sidecar=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - gc-network
+    profiles:
+      - postgres
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9092:9090"  # Avoid conflict with GC metrics port
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+      - '--web.listen-address=0.0.0.0:9090'
+    restart: unless-stopped
+    networks:
+      - gc-network
+    profiles:
+      - monitoring
+
+  # Grafana for metrics visualization
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    restart: unless-stopped
+    networks:
+      - gc-network
+    profiles:
+      - monitoring
+
+  # Test client service
+  test-client:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    environment:
+      - GC_SERVICE_URL=gc-sidecar:50051
+      - SERVICE_ID=test-client
+    depends_on:
+      - gc-sidecar
+    networks:
+      - gc-network
+    profiles:
+      - testing
+
+  # Cleanup endpoint for testing
+  cleanup-server:
+    image: python:3.11-slim
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./test_cleanup_server.py:/app/cleanup_server.py:ro
+    working_dir: /app
+    command: python cleanup_server.py
+    networks:
+      - gc-network
+    profiles:
+      - testing
+
+volumes:
+  postgres_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  gc-network:
+    driver: bridge
+    name: distributed-gc-network
