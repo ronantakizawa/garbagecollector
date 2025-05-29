@@ -1,4 +1,4 @@
-# Distributed Garbage Collection Sidecar
+# Garbage Truck: A Lease-based Garbage Collection Sidecar for Distributed Systems
 
 A high-performance, lease-based distributed garbage collection system for microservices, built with Rust and gRPC. This sidecar service automatically manages cross-service object references and reclaims orphaned resources when leases expire.
 
