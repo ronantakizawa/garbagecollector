@@ -1,6 +1,9 @@
-# Garbage Truck: A Lease-based Garbage Collection Sidecar for Distributed Systems
+# GarbageTruck: A Lease-based Garbage Collection Sidecar for Distributed Systems
 
 A high-performance, lease-based distributed garbage collection system for microservices, built with Rust and gRPC. This sidecar service automatically manages cross-service object references and reclaims orphaned resources when leases expire.
+
+![ChatGPT Image May 29, 2025, 03_51_31 PM](https://github.com/user-attachments/assets/f8a018ba-fc0e-41b0-b022-b704a0049dc3)
+
 
 ## 🎯 Features
 
@@ -19,7 +22,7 @@ A high-performance, lease-based distributed garbage collection system for micros
 - Custom resource types
 
 ### Advanced Features
-- **Multi-backend Storage**: In-memory (development) and PostgreSQL (production ready)
+- **Multi-backend Storage**: In-memory (development) and PostgreSQL
 - **Retry Logic**: Configurable retry policies for cleanup operations
 - **Metrics & Monitoring**: Prometheus metrics with comprehensive tracking
 - **Health Checks**: Built-in health monitoring and status reporting
@@ -39,8 +42,8 @@ A high-performance, lease-based distributed garbage collection system for micros
          └───────────────────────┼───────────────────────┘
                                  │
                 ┌─────────────────▼─────────────────┐
-                │     GC Sidecar Service            │
-                │   (Port 50051 - gRPC)            │
+                │     GarbageTruck Sidecar Service  │
+                │   (Port 50051 - gRPC)             │
                 │                                   │
                 │ ┌─────────────┐ ┌─────────────┐   │
                 │ │ Lease Mgr   │ │ Cleanup Exec│   │
