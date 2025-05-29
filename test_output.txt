@@ -1,3 +1,6 @@
+RUST_LOG=debug ./target/release/gc-sidecar
+
+
 base) ronantakizawa@temps-MacBook-Pro-6 garbagecollector % # Make sure the service is running first
 RUST_LOG=distributed_gc_sidecar=info ./target/release/gc-sidecar &
 

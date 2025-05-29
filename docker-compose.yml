@@ -6,8 +6,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        - BUILDKIT_INLINE_CACHE=1
     ports:
       - "50051:50051"  # gRPC port
       - "9090:9090"    # Metrics port
@@ -24,7 +22,7 @@ services:
       - GC_CLEANUP_GRACE_PERIOD=30         # 30 seconds
       - GC_MAX_LEASES_PER_SERVICE=10000
       
-      # Storage configuration (use memory for Docker demo)
+      # Storage configuration (memory for this example)
       - GC_STORAGE_BACKEND=memory
       
       # Cleanup configuration
@@ -40,15 +38,110 @@ services:
       - RUST_LOG=distributed_gc_sidecar=info
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      test: ["CMD", "grpcurl", "-plaintext", "-import-path", "proto", "-proto", "gc_service.proto", "localhost:50051", "distributed_gc.DistributedGCService/HealthCheck"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
-    networks:
-      - gc-network
+      start_period: 10s
 
-  # PostgreSQL Database (optional, for persistence)
+  # Test cleanup service (for demonstration)
+  cleanup-service:
+    image: python:3.11-slim
+    ports:
+      - "8080:8080"
+    command: >
+      bash -c "
+        pip install --no-cache-dir requests &&
+        cat > cleanup_server.py << 'EOF' &&
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        import json
+        import logging
+        from datetime import datetime
+        
+        logging.basicConfig(level=logging.INFO)
+        logger = logging.getLogger(__name__)
+        
+        class CleanupHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                try:
+                    content_length = int(self.headers['Content-Length'])
+                    post_data = self.rfile.read(content_length)
+                    cleanup_request = json.loads(post_data)
+                    
+                    timestamp = datetime.now().isoformat()
+                    logger.info(f'🧹 [{timestamp}] Cleanup request: {cleanup_request}')
+                    
+                    # Simulate cleanup work
+                    import time
+                    time.sleep(0.1)
+                    
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        'success': True,
+                        'message': 'Cleanup completed',
+                        'timestamp': timestamp,
+                        'object_id': cleanup_request.get('object_id')
+                    }).encode())
+                    
+                except Exception as e:
+                    logger.error(f'❌ Cleanup error: {e}')
+                    self.send_response(500)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            
+            def do_GET(self):
+                # Health check
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'status': 'running', 'service': 'cleanup'}).encode())
+            
+            def log_message(self, format, *args):
+                pass
+        
+        if __name__ == '__main__':
+            print('🚀 Starting cleanup service on port 8080')
+            httpd = HTTPServer(('0.0.0.0', 8080), CleanupHandler)
+            httpd.serve_forever()
+        EOF
+        python cleanup_server.py
+      "
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Test client container (for running tests)
+  test-client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: /bin/bash
+    command: >
+      -c "
+        echo '🧪 GC Sidecar Test Client Container' &&
+        echo 'Available commands:' &&
+        echo '- ./test-service.sh  # Run basic tests' &&
+        echo '- grpcurl ...        # Manual gRPC calls' &&
+        echo '- /bin/bash          # Interactive shell' &&
+        echo '' &&
+        echo 'Starting interactive shell...' &&
+        /bin/bash
+      "
+    depends_on:
+      - gc-sidecar
+    environment:
+      - GC_SERVICE_URL=gc-sidecar:50051
+      - CLEANUP_SERVICE_URL=cleanup-service:8080
+    profiles:
+      - testing
+
+  # PostgreSQL (optional, for persistent storage testing)
   postgres:
     image: postgres:15-alpine
     environment:
@@ -67,8 +160,6 @@ services:
       retries: 3
       start_period: 10s
     restart: unless-stopped
-    networks:
-      - gc-network
     profiles:
       - postgres
 
@@ -91,18 +182,16 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
-    networks:
-      - gc-network
     profiles:
       - postgres
 
-  # Prometheus for metrics collection
+  # Prometheus (optional, for metrics collection)
   prometheus:
     image: prom/prometheus:latest
     ports:
-      - "9092:9090"  # Avoid conflict with GC metrics port
+      - "9092:9090"  # Different port to avoid conflicts
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -110,14 +199,11 @@ services:
       - '--web.console.libraries=/etc/prometheus/console_libraries'
       - '--web.console.templates=/etc/prometheus/consoles'
       - '--web.enable-lifecycle'
-      - '--web.listen-address=0.0.0.0:9090'
     restart: unless-stopped
-    networks:
-      - gc-network
     profiles:
       - monitoring
 
-  # Grafana for metrics visualization
+  # Grafana (optional, for metrics visualization)
   grafana:
     image: grafana/grafana:latest
     ports:
@@ -127,49 +213,14 @@ services:
     volumes:
       - grafana_data:/var/lib/grafana
     restart: unless-stopped
-    networks:
-      - gc-network
     profiles:
       - monitoring
 
-  # Test client service
-  test-client:
-    build:
-      context: .
-      dockerfile: Dockerfile.test
-    environment:
-      - GC_SERVICE_URL=gc-sidecar:50051
-      - SERVICE_ID=test-client
-    depends_on:
-      - gc-sidecar
-    networks:
-      - gc-network
-    profiles:
-      - testing
-
-  # Cleanup endpoint for testing
-  cleanup-server:
-    image: python:3.11-slim
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./test_cleanup_server.py:/app/cleanup_server.py:ro
-    working_dir: /app
-    command: python cleanup_server.py
-    networks:
-      - gc-network
-    profiles:
-      - testing
-
 volumes:
   postgres_data:
-    driver: local
   prometheus_data:
-    driver: local
   grafana_data:
-    driver: local
 
 networks:
-  gc-network:
-    driver: bridge
+  default:
     name: distributed-gc-network

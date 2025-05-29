@@ -49,6 +49,37 @@ tower = "0.4"
 anyhow = "1.0"
 thiserror = "1.0"
 
+[dev-dependencies]
+# Testing framework
+tokio-test = "0.4"
+tempfile = "3.8"
+
+# HTTP server for mock cleanup endpoint
+warp = "0.3"
+
+# Additional utilities for testing
+uuid = { version = "1.0", features = ["v4"] }
+serde_json = "1.0"
+
+# For integration tests
+tonic = { version = "0.12", features = ["transport"] }
+
+# Test utilities
+pretty_assertions = "1.4"
+serial_test = "3.0"  # For tests that need to run sequentially
+
+# Performance testing (optional)
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[test]]
+name = "integration"
+path = "tests/integration_test.rs"
+
+[[bench]]
+name = "gc_benchmarks"
+harness = false
+
+
 [build-dependencies]
 tonic-build = "0.12"
 
