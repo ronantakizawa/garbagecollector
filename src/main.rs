@@ -14,6 +14,7 @@ mod metrics;
 
 use config::Config;
 use service::GCService;
+use metrics::{MetricsInterceptor, start_system_monitoring};
 
 // Include the generated protobuf code
 pub mod proto {
@@ -40,6 +41,12 @@ async fn main() -> Result<()> {
     // Create the service
     let gc_service = GCService::new(config.clone()).await?;
     
+    // Get metrics reference for middleware
+    let metrics = gc_service.get_metrics();
+    
+    // Start system monitoring background task
+    let _monitoring_handle = start_system_monitoring(metrics.clone());
+    
     // Clone for the cleanup task
     let cleanup_gc_service = gc_service.clone();
     
@@ -48,15 +55,27 @@ async fn main() -> Result<()> {
         cleanup_gc_service.start_cleanup_loop().await;
     });
 
-    // Start gRPC server
+    // Start gRPC server with interceptor
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port)
         .parse()
         .expect("Invalid server address");
 
     info!("Starting gRPC server on {}", addr);
 
+    // Create the gRPC service with metrics interceptor
+    let grpc_service = proto::distributed_gc_service_server::DistributedGcServiceServer::new(gc_service);
+    
+    // Create metrics interceptor
+    let metrics_interceptor = MetricsInterceptor::new(metrics);
+    
+    // Apply interceptor to service
+    let intercepted_service = tonic::service::interceptor::InterceptedService::new(
+        grpc_service,
+        metrics_interceptor,
+    );
+
     let server = Server::builder()
-        .add_service(proto::distributed_gc_service_server::DistributedGcServiceServer::new(gc_service))
+        .add_service(intercepted_service)
         .serve(addr);
 
     // Graceful shutdown

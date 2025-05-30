@@ -1,14 +1,16 @@
 use async_trait::async_trait;
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::str::FromStr;
 
 use crate::config::Config;
 use crate::error::{GCError, Result};
-use crate::lease::{Lease, LeaseFilter, LeaseStats, LeaseState, ObjectType};
+use crate::lease::{Lease, LeaseFilter, LeaseStats, LeaseState};
 
 #[cfg(feature = "postgres")]
-use sqlx::{PgPool, Row, postgres::PgConnectOptions, query, query_as};
+use sqlx::{PgPool, Row, postgres::PgConnectOptions, query};
+
+#[cfg(feature = "postgres")]
+use std::str::FromStr;
 
 #[async_trait]
 pub trait Storage: Send + Sync {
@@ -210,27 +212,27 @@ impl PostgresStorage {
         Ok(Self { pool })
     }
 
-    fn object_type_to_int(obj_type: &ObjectType) -> i32 {
+    fn object_type_to_int(obj_type: &crate::lease::ObjectType) -> i32 {
         match obj_type {
-            ObjectType::Unknown => 0,
-            ObjectType::DatabaseRow => 1,
-            ObjectType::BlobStorage => 2,
-            ObjectType::TemporaryFile => 3,
-            ObjectType::WebsocketSession => 4,
-            ObjectType::CacheEntry => 5,
-            ObjectType::Custom => 6,
+            crate::lease::ObjectType::Unknown => 0,
+            crate::lease::ObjectType::DatabaseRow => 1,
+            crate::lease::ObjectType::BlobStorage => 2,
+            crate::lease::ObjectType::TemporaryFile => 3,
+            crate::lease::ObjectType::WebsocketSession => 4,
+            crate::lease::ObjectType::CacheEntry => 5,
+            crate::lease::ObjectType::Custom => 6,
         }
     }
 
-    fn int_to_object_type(val: i32) -> ObjectType {
+    fn int_to_object_type(val: i32) -> crate::lease::ObjectType {
         match val {
-            1 => ObjectType::DatabaseRow,
-            2 => ObjectType::BlobStorage,
-            3 => ObjectType::TemporaryFile,
-            4 => ObjectType::WebsocketSession,
-            5 => ObjectType::CacheEntry,
-            6 => ObjectType::Custom,
-            _ => ObjectType::Unknown,
+            1 => crate::lease::ObjectType::DatabaseRow,
+            2 => crate::lease::ObjectType::BlobStorage,
+            3 => crate::lease::ObjectType::TemporaryFile,
+            4 => crate::lease::ObjectType::WebsocketSession,
+            5 => crate::lease::ObjectType::CacheEntry,
+            6 => crate::lease::ObjectType::Custom,
+            _ => crate::lease::ObjectType::Unknown,
         }
     }
 
@@ -406,25 +408,21 @@ impl Storage for PostgresStorage {
     async fn list_leases(&self, filter: LeaseFilter, limit: Option<usize>, offset: Option<usize>) -> Result<Vec<Lease>> {
         // Build query parts
         let mut where_conditions = Vec::new();
-        let mut params: Vec<Box<dyn sqlx::Encode<'_, sqlx::Postgres> + Send + Sync>> = Vec::new();
         let mut param_count = 0;
 
         if let Some(ref service_id) = filter.service_id {
             param_count += 1;
             where_conditions.push(format!("service_id = ${}", param_count));
-            params.push(Box::new(service_id.clone()));
         }
 
         if let Some(ref object_type) = filter.object_type {
             param_count += 1;
             where_conditions.push(format!("object_type = ${}", param_count));
-            params.push(Box::new(Self::object_type_to_int(object_type)));
         }
 
         if let Some(ref state) = filter.state {
             param_count += 1;
             where_conditions.push(format!("state = ${}", param_count));
-            params.push(Box::new(Self::lease_state_to_int(state)));
         }
 
         // Build complete query

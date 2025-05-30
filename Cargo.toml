@@ -10,7 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # gRPC and protobuf
-tonic = "0.12"
+tonic = { version = "0.12", features = ["transport"] }
 prost = "0.13"
 prost-types = "0.13"
 tokio = { version = "1.0", features = ["full"] }
@@ -47,8 +47,8 @@ sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid"
 # Metrics
 prometheus = "0.13"
 
-# Tower for middleware
-tower = "0.4"
+# Tower for middleware (only what we need)
+tower = { version = "0.4", features = ["util"] }
 
 # Error handling
 anyhow = "1.0"
