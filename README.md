@@ -1,8 +1,7 @@
 # GarbageTruck: A Lease-based Garbage Collection Sidecar for Distributed Systems
 
 A high-performance, lease-based distributed garbage collection system for microservices, built with Rust and gRPC. This sidecar service automatically manages cross-service object references and reclaims orphaned resources when leases expire.
-
-![ChatGPT Image May 29, 2025, 03_51_31 PM](https://github.com/user-attachments/assets/f8a018ba-fc0e-41b0-b022-b704a0049dc3)
+<img width="592" alt="Screenshot 2025-05-30 at 12 43 20 PM" src="https://github.com/user-attachments/assets/f745ec72-c6cf-473a-af05-713c2fc1cac2" />
 
 ## 🎯 Features
 
