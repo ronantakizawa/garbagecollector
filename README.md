@@ -128,11 +128,18 @@ sudo apt-get install grpcurl
 
 ### Basic Testing
 
+### 1. Start server
 ```bash
-# Health check
+cargo build
+RUST_LOG=debug ./target/release/gc-sidecar
+```
+### 2. Run gRPC Health Check
+```bash
 grpcurl -plaintext -import-path proto -proto gc_service.proto localhost:50051 distributed_gc.DistributedGCService/HealthCheck
+```
 
-# Create a lease
+### 3. Enter basic lease
+```bash
 grpcurl -plaintext -import-path proto -proto gc_service.proto -d '{
   "object_id": "session-12345",
   "object_type": "WEBSOCKET_SESSION",
@@ -140,9 +147,67 @@ grpcurl -plaintext -import-path proto -proto gc_service.proto -d '{
   "lease_duration_seconds": 60,
   "metadata": {"user_id": "user123"}
 }' localhost:50051 distributed_gc.DistributedGCService/CreateLease
-
-# List leases
+```
+### 4. List leases
+```bash
 grpcurl -plaintext -import-path proto -proto gc_service.proto -d '{"limit": 10}' localhost:50051 distributed_gc.DistributedGCService/ListLeases
+```
+
+## gRPC Functionality Testing 
+
+
+### 1. Start server
+```bash
+cargo build
+RUST_LOG=debug ./target/release/gc-sidecar
+```
+
+### 2. Run gRPC Tests
+```bash
+cargo test --features grpc
+```
+
+## PostgreSQL Functionality Testing 
+
+### 1. Start server
+```bash
+cargo build
+RUST_LOG=debug ./target/release/gc-sidecar
+```
+
+### 2. Start a Test Postgres Database (via Docker)
+
+Start a local Postgres instance (if you don’t have one running already):
+
+```bash
+docker run --name sqlx-test-db \
+  -e POSTGRES_USER=testuser \
+  -e POSTGRES_PASSWORD=testpass \
+  -e POSTGRES_DB=testdb \
+  -p 5432:5432 \
+  -d postgres:16
+```
+
+### 3. Set the Database URL
+
+Export the database URL for use by tests:
+
+```bash
+export DATABASE_URL=postgres://testuser:testpass@localhost:5432/testdb
+```
+
+### 4. Apply the Schema Using Docker
+
+Run migrations directly inside your running container:
+
+```bash
+docker exec -i sqlx-test-db psql -U testuser -d testdb < migrations/001_initial.sql
+```
+
+### 5. Run the Test 
+
+```bash
+cargo test
 ```
 
 ## ⚙️ Configuration
@@ -186,10 +251,3 @@ export GC_CLEANUP_RETRY_DELAY=5
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-- Built with [Tonic](https://github.com/hyperium/tonic) for gRPC support
-- Uses [Tokio](https://tokio.rs/) for async runtime
-- Metrics powered by [Prometheus](https://prometheus.io/)
-- High-performance collections with [DashMap](https://github.com/xacrimon/dashmap)

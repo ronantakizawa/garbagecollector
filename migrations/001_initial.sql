@@ -10,16 +10,7 @@ CREATE TABLE IF NOT EXISTS leases (
     last_renewed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     metadata JSONB NOT NULL DEFAULT '{}',
     cleanup_config JSONB,
-    renewal_count INTEGER NOT NULL DEFAULT 0,
-    
-    -- Indexes for common queries
-    INDEX idx_leases_service_id (service_id),
-    INDEX idx_leases_object_type (object_type),
-    INDEX idx_leases_state (state),
-    INDEX idx_leases_expires_at (expires_at),
-    INDEX idx_leases_created_at (created_at),
-    INDEX idx_leases_service_state (service_id, state),
-    INDEX idx_leases_expired_cleanup (state, expires_at) WHERE state = 0 AND expires_at < NOW()
+    renewal_count INTEGER NOT NULL DEFAULT 0
 );
 
 -- Create cleanup_history table for tracking cleanup operations
@@ -32,11 +23,7 @@ CREATE TABLE IF NOT EXISTS cleanup_history (
     cleanup_completed_at TIMESTAMPTZ,
     success BOOLEAN NOT NULL DEFAULT FALSE,
     error_message TEXT,
-    retry_count INTEGER NOT NULL DEFAULT 0,
-    
-    INDEX idx_cleanup_history_lease_id (lease_id),
-    INDEX idx_cleanup_history_service_id (service_id),
-    INDEX idx_cleanup_history_started_at (cleanup_started_at)
+    retry_count INTEGER NOT NULL DEFAULT 0
 );
 
 -- Create service_stats table for tracking per-service metrics
@@ -48,11 +35,33 @@ CREATE TABLE IF NOT EXISTS service_stats (
     total_leases_released INTEGER NOT NULL DEFAULT 0,
     current_active_leases INTEGER NOT NULL DEFAULT 0,
     last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    
-    INDEX idx_service_stats_last_activity (last_activity_at),
-    INDEX idx_service_stats_active_leases (current_active_leases)
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Add indexes for common queries (outside the CREATE TABLE statements)
+CREATE INDEX IF NOT EXISTS idx_leases_service_id ON leases (service_id);
+CREATE INDEX IF NOT EXISTS idx_leases_object_type ON leases (object_type);
+CREATE INDEX IF NOT EXISTS idx_leases_state ON leases (state);
+CREATE INDEX IF NOT EXISTS idx_leases_expires_at ON leases (expires_at);
+CREATE INDEX IF NOT EXISTS idx_leases_created_at ON leases (created_at);
+CREATE INDEX IF NOT EXISTS idx_leases_service_state ON leases (service_id, state);
+CREATE INDEX IF NOT EXISTS idx_leases_state_expires_at ON leases (state, expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_cleanup_history_lease_id ON cleanup_history (lease_id);
+CREATE INDEX IF NOT EXISTS idx_cleanup_history_service_id ON cleanup_history (service_id);
+CREATE INDEX IF NOT EXISTS idx_cleanup_history_started_at ON cleanup_history (cleanup_started_at);
+
+CREATE INDEX IF NOT EXISTS idx_service_stats_last_activity ON service_stats (last_activity_at);
+CREATE INDEX IF NOT EXISTS idx_service_stats_active_leases ON service_stats (current_active_leases);
+
+-- These partial indexes do not use NOW() and are legal.
+CREATE INDEX IF NOT EXISTS idx_leases_service_active 
+    ON leases (service_id) WHERE state = 0;
+
+CREATE INDEX IF NOT EXISTS idx_leases_cleanup_ready 
+    ON leases (expires_at, state) WHERE state = 0;
+
+-- No index with NOW() or any non-IMMUTABLE function in WHERE clause!
 
 -- Create function to update service stats automatically
 CREATE OR REPLACE FUNCTION update_service_stats() RETURNS TRIGGER AS $$
@@ -116,6 +125,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Create trigger to automatically update service stats
+DROP TRIGGER IF EXISTS trigger_update_service_stats ON leases;
 CREATE TRIGGER trigger_update_service_stats
     AFTER INSERT OR UPDATE OR DELETE ON leases
     FOR EACH ROW EXECUTE FUNCTION update_service_stats();
@@ -156,18 +166,6 @@ BEGIN
     FROM leases;
 END;
 $$ LANGUAGE plpgsql;
-
--- Create indexes for performance
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_leases_service_active 
-ON leases (service_id) WHERE state = 0;
-
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_leases_cleanup_ready 
-ON leases (expires_at, state) WHERE state = 0;
-
--- Create partial index for expired leases needing cleanup
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_leases_expired_for_cleanup 
-ON leases (expires_at) 
-WHERE state = 0 AND expires_at < NOW();
 
 -- Comments for documentation
 COMMENT ON TABLE leases IS 'Stores lease information for distributed garbage collection';

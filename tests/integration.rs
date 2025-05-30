@@ -8,6 +8,7 @@ use tokio::time::sleep;
 use tonic::transport::Channel;
 use uuid::Uuid;
 use std::sync::atomic::{AtomicU16, Ordering};
+use chrono::{Duration as ChronoDuration, Utc};
 
 // Import from the main crate - using the correct crate name
 use distributed_gc_sidecar::proto::{
@@ -16,6 +17,20 @@ use distributed_gc_sidecar::proto::{
     ReleaseLeaseRequest, ListLeasesRequest, HealthCheckRequest, MetricsRequest,
     ObjectType, LeaseState, CleanupConfig,
 };
+
+// Import storage components for direct testing
+use distributed_gc_sidecar::{
+    storage::{Storage, MemoryStorage, create_storage},
+    config::Config,
+    lease::{Lease, LeaseFilter, ObjectType as InternalObjectType, LeaseState as InternalLeaseState, CleanupConfig as InternalCleanupConfig},
+};
+
+#[cfg(feature = "postgres")]
+use distributed_gc_sidecar::storage::PostgresStorage;
+
+// Add SQLx Row trait for try_get method
+#[cfg(feature = "postgres")]
+use sqlx::Row;
 
 // Global port counter to avoid conflicts
 static PORT_COUNTER: AtomicU16 = AtomicU16::new(8080);
@@ -176,6 +191,391 @@ async fn start_mock_cleanup_server(server: MockCleanupServer, port: u16) {
         .await;
 }
 
+// Helper function to create test lease
+fn create_test_lease_data(object_id: &str, service_id: &str, duration_secs: u64) -> Lease {
+    let metadata = [("test".to_string(), "value".to_string())].into();
+    let cleanup_config = Some(InternalCleanupConfig {
+        cleanup_endpoint: String::new(),
+        cleanup_http_endpoint: "http://localhost:8080/cleanup".to_string(),
+        cleanup_payload: r#"{"action":"delete"}"#.to_string(),
+        max_retries: 3,
+        retry_delay_seconds: 1,
+    });
+
+    Lease::new(
+        object_id.to_string(),
+        InternalObjectType::DatabaseRow,
+        service_id.to_string(),
+        Duration::from_secs(duration_secs),
+        metadata,
+        cleanup_config,
+    )
+}
+
+// =============================================================================
+// Storage Tests - Direct storage layer testing
+// =============================================================================
+#[cfg(feature = "grpc")]
+#[tokio::test]
+async fn test_memory_storage_basic_operations() -> Result<()> {
+    println!("💾 Testing memory storage basic operations...");
+    
+    let storage = MemoryStorage::new();
+    let lease = create_test_lease_data("test-object-1", "test-service", 300);
+    let lease_id = lease.lease_id.clone();
+    
+    // Test create
+    storage.create_lease(lease.clone()).await?;
+    println!("✅ Created lease in memory storage");
+    
+    // Test get
+    let retrieved = storage.get_lease(&lease_id).await?;
+    assert!(retrieved.is_some(), "Should retrieve the created lease");
+    let retrieved_lease = retrieved.unwrap();
+    assert_eq!(retrieved_lease.object_id, lease.object_id);
+    assert_eq!(retrieved_lease.service_id, lease.service_id);
+    println!("✅ Retrieved lease from memory storage");
+    
+    // Test update
+    let mut updated_lease = retrieved_lease.clone();
+    updated_lease.renew(Duration::from_secs(600))?;
+    storage.update_lease(updated_lease.clone()).await?;
+    
+    let updated_retrieved = storage.get_lease(&lease_id).await?.unwrap();
+    assert!(updated_retrieved.renewal_count > 0, "Renewal count should increase");
+    println!("✅ Updated lease in memory storage");
+    
+    // Test delete
+    storage.delete_lease(&lease_id).await?;
+    let deleted_check = storage.get_lease(&lease_id).await?;
+    assert!(deleted_check.is_none(), "Lease should be deleted");
+    println!("✅ Deleted lease from memory storage");
+    
+    Ok(())
+}
+#[cfg(feature = "grpc")]
+#[tokio::test]
+async fn test_memory_storage_filtering_and_listing() -> Result<()> {
+    println!("🔍 Testing memory storage filtering and listing...");
+    
+    let storage = MemoryStorage::new();
+    
+    // Create multiple leases with different properties
+    let leases = vec![
+        create_test_lease_data("obj-1", "service-a", 300),
+        create_test_lease_data("obj-2", "service-a", 300),
+        create_test_lease_data("obj-3", "service-b", 300),
+    ];
+    
+    for lease in &leases {
+        storage.create_lease(lease.clone()).await?;
+    }
+    
+    // Test listing all leases
+    let all_leases = storage.list_leases(LeaseFilter::default(), None, None).await?;
+    assert_eq!(all_leases.len(), 3, "Should have 3 total leases");
+    println!("✅ Listed all leases");
+    
+    // Test filtering by service
+    let service_filter = LeaseFilter {
+        service_id: Some("service-a".to_string()),
+        ..Default::default()
+    };
+    let service_leases = storage.list_leases(service_filter, None, None).await?;
+    assert_eq!(service_leases.len(), 2, "Should have 2 leases for service-a");
+    println!("✅ Filtered leases by service");
+    
+    // Test counting
+    let count = storage.count_leases(LeaseFilter::default()).await?;
+    assert_eq!(count, 3, "Should count 3 total leases");
+    println!("✅ Counted leases");
+    
+    // Test pagination
+    let paginated = storage.list_leases(LeaseFilter::default(), Some(2), Some(1)).await?;
+    assert_eq!(paginated.len(), 2, "Should have 2 leases with limit");
+    println!("✅ Paginated lease listing");
+    
+    Ok(())
+}
+#[cfg(feature = "grpc")]
+#[tokio::test]
+async fn test_memory_storage_expired_leases() -> Result<()> {
+    println!("⏰ Testing memory storage expired lease handling...");
+    
+    let storage = MemoryStorage::new();
+    
+    // Create a lease that's already expired (negative duration simulation)
+    let mut expired_lease = create_test_lease_data("expired-obj", "test-service", 300);
+    // Manually set expiration time to the past
+    expired_lease.expires_at = chrono::Utc::now() - chrono::Duration::seconds(60);
+
+    // THIS LINE IS CRUCIAL!
+    expired_lease.state = LeaseState::Expired.into();
+
+    storage.create_lease(expired_lease.clone()).await?;
+    
+    // Test getting expired leases
+    let grace_period = Duration::from_secs(30);
+    let expired_leases = storage.get_expired_leases(grace_period).await?;
+    
+    assert_eq!(expired_leases.len(), 1, "Should find 1 expired lease");
+    assert_eq!(expired_leases[0].lease_id, expired_lease.lease_id);
+    println!("✅ Found expired leases");
+    
+    // Test cleanup
+    storage.cleanup().await?;
+    println!("✅ Ran storage cleanup");
+    
+    Ok(())
+}
+#[cfg(feature = "grpc")]
+#[tokio::test]
+async fn test_memory_storage_statistics() -> Result<()> {
+    println!("📊 Testing memory storage statistics...");
+    
+    let storage = MemoryStorage::new();
+    
+    // Create leases with different states
+    let mut active_lease = create_test_lease_data("active-obj", "stats-service", 300);
+    let mut released_lease = create_test_lease_data("released-obj", "stats-service", 300);
+    released_lease.release();
+    
+    storage.create_lease(active_lease).await?;
+    storage.create_lease(released_lease).await?;
+    
+    // Get statistics
+    let stats = storage.get_stats().await?;
+    
+    assert_eq!(stats.total_leases, 2, "Should have 2 total leases");
+    assert_eq!(stats.active_leases, 1, "Should have 1 active lease");
+    assert_eq!(stats.released_leases, 1, "Should have 1 released lease");
+    
+    // Check service breakdown
+    assert!(stats.leases_by_service.contains_key("stats-service"));
+    assert_eq!(stats.leases_by_service["stats-service"], 2);
+    
+    // Check type breakdown
+    assert!(stats.leases_by_type.contains_key("DatabaseRow"));
+    
+    println!("✅ Generated storage statistics");
+    println!("   Total: {}, Active: {}, Released: {}", 
+             stats.total_leases, stats.active_leases, stats.released_leases);
+    
+    Ok(())
+}
+
+// PostgreSQL Storage Tests - Only run if postgres feature is enabled
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn test_postgres_storage_basic_operations() -> Result<()> {
+    println!("🐘 Testing PostgreSQL storage basic operations...");
+    
+    // Skip if no DATABASE_URL is set
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            println!("⚠️  Skipping PostgreSQL test - DATABASE_URL not set");
+            return Ok(());
+        }
+    };
+    
+    // Create PostgreSQL storage
+    let storage = PostgresStorage::new(&database_url, 5).await?;
+    let lease = create_test_lease_data("pg-test-object-1", "pg-test-service", 300);
+    let lease_id = lease.lease_id.clone();
+    
+    // Test create
+    storage.create_lease(lease.clone()).await?;
+    println!("✅ Created lease in PostgreSQL storage");
+    
+    // Test get
+    let retrieved = storage.get_lease(&lease_id).await?;
+    assert!(retrieved.is_some(), "Should retrieve the created lease");
+    let retrieved_lease = retrieved.unwrap();
+    assert_eq!(retrieved_lease.object_id, lease.object_id);
+    assert_eq!(retrieved_lease.service_id, lease.service_id);
+    println!("✅ Retrieved lease from PostgreSQL storage");
+    
+    // Test update
+    let mut updated_lease = retrieved_lease.clone();
+    updated_lease.renew(Duration::from_secs(600))?;
+    storage.update_lease(updated_lease.clone()).await?;
+    
+    let updated_retrieved = storage.get_lease(&lease_id).await?.unwrap();
+    assert!(updated_retrieved.renewal_count > 0, "Renewal count should increase");
+    println!("✅ Updated lease in PostgreSQL storage");
+    
+    // Test delete
+    storage.delete_lease(&lease_id).await?;
+    let deleted_check = storage.get_lease(&lease_id).await?;
+    assert!(deleted_check.is_none(), "Lease should be deleted");
+    println!("✅ Deleted lease from PostgreSQL storage");
+    
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn test_postgres_storage_advanced_queries() -> Result<()> {
+    println!("🔍 Testing PostgreSQL storage advanced queries...");
+    
+    // Skip if no DATABASE_URL is set
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            println!("⚠️  Skipping PostgreSQL advanced test - DATABASE_URL not set");
+            return Ok(());
+        }
+    };
+    
+    let storage = PostgresStorage::new(&database_url, 5).await?;
+    
+    // Create test data with different services and types
+    let test_leases = vec![
+        create_test_lease_data("pg-obj-1", "pg-service-1", 300),
+        create_test_lease_data("pg-obj-2", "pg-service-1", 300),
+        create_test_lease_data("pg-obj-3", "pg-service-2", 300),
+    ];
+    
+    for lease in &test_leases {
+        storage.create_lease(lease.clone()).await?;
+    }
+    
+    // Test complex filtering
+    let service_filter = LeaseFilter {
+        service_id: Some("pg-service-1".to_string()),
+        object_type: Some(InternalObjectType::DatabaseRow),
+        state: Some(InternalLeaseState::Active),
+        ..Default::default()
+    };
+    
+    let filtered_leases = storage.list_leases(service_filter, Some(10), None).await?;
+    assert_eq!(filtered_leases.len(), 2, "Should find 2 leases for pg-service-1");
+    println!("✅ Complex filtering works in PostgreSQL");
+    
+    // Test statistics with database functions
+    let stats = storage.get_stats().await?;
+    assert!(stats.total_leases >= 3, "Should have at least 3 leases");
+    println!("✅ PostgreSQL statistics: {} total leases", stats.total_leases);
+    
+    // Clean up test data
+    for lease in &test_leases {
+        let _ = storage.delete_lease(&lease.lease_id).await;
+    }
+    
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn test_postgres_storage_concurrent_operations() -> Result<()> {
+    println!("🚀 Testing PostgreSQL storage concurrent operations...");
+    
+    // Skip if no DATABASE_URL is set
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            println!("⚠️  Skipping PostgreSQL concurrent test - DATABASE_URL not set");
+            return Ok(());
+        }
+    };
+    
+    let storage = Arc::new(PostgresStorage::new(&database_url, 10).await?);
+    let mut handles = vec![];
+    
+    // Create multiple concurrent operations
+    for i in 0..10 {
+        let storage_clone = storage.clone();
+        let handle = tokio::spawn(async move {
+            let lease = create_test_lease_data(
+                &format!("concurrent-pg-obj-{}", i),
+                &format!("concurrent-pg-service-{}", i % 3), // 3 different services
+                300
+            );
+            
+            // Create, update, and then clean up
+            match storage_clone.create_lease(lease.clone()).await {
+                Ok(_) => {
+                    // Try to update the lease
+                    let mut updated_lease = lease.clone();
+                    updated_lease.renew(Duration::from_secs(600)).unwrap();
+                    let _ = storage_clone.update_lease(updated_lease).await;
+                    
+                    // Clean up
+                    let _ = storage_clone.delete_lease(&lease.lease_id).await;
+                    true
+                }
+                Err(_) => false,
+            }
+        });
+        handles.push(handle);
+    }
+    
+    // Wait for all operations to complete
+    let mut successful_ops = 0;
+    for handle in handles {
+        if handle.await? {
+            successful_ops += 1;
+        }
+    }
+    
+    assert!(successful_ops >= 8, "Most concurrent operations should succeed");
+    println!("✅ PostgreSQL concurrent operations: {}/10 successful", successful_ops);
+    
+    Ok(())
+}
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn test_storage_factory() -> Result<()> {
+    println!("🏭 Testing storage factory...");
+    
+    // Test memory storage creation
+    let mut config = Config::default();
+    config.storage.backend = "memory".to_string();
+    
+    let memory_storage = create_storage(&config).await?;
+    
+    // Test basic operation
+    let test_lease = create_test_lease_data("factory-test", "factory-service", 300);
+    memory_storage.create_lease(test_lease.clone()).await?;
+    
+    let retrieved = memory_storage.get_lease(&test_lease.lease_id).await?;
+    assert!(retrieved.is_some(), "Should create and retrieve lease via factory");
+    
+    println!("✅ Memory storage factory works");
+    
+    // Test PostgreSQL storage creation (if available)
+    #[cfg(feature = "postgres")]
+    {
+        if let Ok(database_url) = std::env::var("DATABASE_URL") {
+            config.storage.backend = "postgres".to_string();
+            config.storage.database_url = Some(database_url);
+            config.storage.max_connections = Some(5);
+            
+            let postgres_storage = create_storage(&config).await?;
+            
+            let pg_test_lease = create_test_lease_data("pg-factory-test", "pg-factory-service", 300);
+            postgres_storage.create_lease(pg_test_lease.clone()).await?;
+            
+            let pg_retrieved = postgres_storage.get_lease(&pg_test_lease.lease_id).await?;
+            assert!(pg_retrieved.is_some(), "Should create and retrieve lease via PostgreSQL factory");
+            
+            // Clean up
+            let _ = postgres_storage.delete_lease(&pg_test_lease.lease_id).await;
+            
+            println!("✅ PostgreSQL storage factory works");
+        } else {
+            println!("⚠️  Skipping PostgreSQL factory test - DATABASE_URL not set");
+        }
+    }
+    
+    Ok(())
+}
+
+// =============================================================================
+// gRPC Service Tests - Integration tests via gRPC API
+// =============================================================================
+#[cfg(feature = "grpc")]
 #[tokio::test]
 async fn test_health_check() -> Result<()> {
     println!("🏥 Testing health check...");
@@ -192,7 +592,7 @@ async fn test_health_check() -> Result<()> {
     println!("✅ Health check passed");
     Ok(())
 }
-
+#[cfg(feature = "grpc")]
 #[tokio::test]
 async fn test_lease_creation_and_retrieval() -> Result<()> {
     println!("📝 Testing lease creation and retrieval...");
@@ -222,7 +622,7 @@ async fn test_lease_creation_and_retrieval() -> Result<()> {
     println!("✅ Lease creation and retrieval passed");
     Ok(())
 }
-
+#[cfg(feature = "grpc")]
 #[tokio::test]
 async fn test_lease_renewal() -> Result<()> {
     println!("🔄 Testing lease renewal...");
@@ -263,7 +663,7 @@ async fn test_lease_renewal() -> Result<()> {
     println!("✅ Lease renewal passed");
     Ok(())
 }
-
+#[cfg(feature = "grpc")]
 #[tokio::test]
 async fn test_lease_release() -> Result<()> {
     println!("🗑️ Testing lease release...");
@@ -294,7 +694,7 @@ async fn test_lease_release() -> Result<()> {
     println!("✅ Lease release passed");
     Ok(())
 }
-
+#[cfg(feature = "grpc")]
 #[tokio::test]
 async fn test_list_leases() -> Result<()> {
     println!("📋 Testing lease listing...");
@@ -329,7 +729,7 @@ async fn test_list_leases() -> Result<()> {
     println!("✅ Lease listing passed");
     Ok(())
 }
-
+#[cfg(feature = "grpc")]
 #[tokio::test]
 async fn test_metrics_collection() -> Result<()> {
     println!("📊 Testing metrics collection...");
@@ -362,7 +762,7 @@ async fn test_metrics_collection() -> Result<()> {
     println!("✅ Metrics collection passed");
     Ok(())
 }
-
+#[cfg(feature = "grpc")]
 #[tokio::test]
 async fn test_unauthorized_access() -> Result<()> {
     println!("🔒 Testing unauthorized access prevention...");
@@ -397,7 +797,7 @@ async fn test_unauthorized_access() -> Result<()> {
     println!("✅ Unauthorized access prevention passed");
     Ok(())
 }
-
+#[cfg(feature = "grpc")]
 #[tokio::test]
 async fn test_invalid_lease_duration() -> Result<()> {
     println!("⏱️ Testing invalid lease duration handling...");
@@ -439,7 +839,7 @@ async fn test_invalid_lease_duration() -> Result<()> {
     println!("✅ Invalid lease duration handling passed");
     Ok(())
 }
-
+#[cfg(feature = "grpc")]
 #[tokio::test]
 async fn test_concurrent_operations() -> Result<()> {
     println!("🚀 Testing concurrent operations...");
@@ -484,7 +884,7 @@ async fn test_concurrent_operations() -> Result<()> {
     println!("✅ Concurrent operations passed ({}/10 successful)", successful_creates);
     Ok(())
 }
-
+#[cfg(feature = "grpc")]
 #[tokio::test]
 async fn test_automatic_cleanup() -> Result<()> {
     println!("🧹 Testing automatic cleanup...");
@@ -537,7 +937,7 @@ async fn test_automatic_cleanup() -> Result<()> {
     
     Ok(())
 }
-
+#[cfg(feature = "grpc")]
 #[tokio::test]
 async fn test_cleanup_retry_logic() -> Result<()> {
     println!("🔄 Testing cleanup retry logic...");
@@ -575,6 +975,547 @@ async fn test_cleanup_retry_logic() -> Result<()> {
         println!("⚠️  Retry logic test inconclusive - cleanup interval may be longer than test duration");
         println!("   This is expected behavior with longer cleanup intervals");
     }
+    
+    Ok(())
+}
+
+// =============================================================================
+// SQL-Specific Tests - Test database schema, triggers, and functions
+// =============================================================================
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn test_database_schema_integrity() -> Result<()> {
+    println!("🗄️ Testing database schema integrity...");
+    
+    // Skip if no DATABASE_URL is set
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            println!("⚠️  Skipping schema test - DATABASE_URL not set");
+            return Ok(());
+        }
+    };
+    
+    let pool = sqlx::PgPool::connect(&database_url).await?;
+    
+    // Test that all required tables exist
+    let tables = sqlx::query!(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+    )
+    .fetch_all(&pool)
+    .await?;
+    
+    let table_names: Vec<String> = tables.iter().filter_map(|r| r.table_name.clone()).collect();
+
+    
+    assert!(table_names.contains(&"leases".to_string()), "leases table should exist");
+    assert!(table_names.contains(&"cleanup_history".to_string()), "cleanup_history table should exist");
+    assert!(table_names.contains(&"service_stats".to_string()), "service_stats table should exist");
+    
+    println!("✅ All required tables exist");
+    
+    // Test that required indexes exist
+    let indexes = sqlx::query!(
+        "SELECT indexname FROM pg_indexes WHERE schemaname = 'public'"
+    )
+    .fetch_all(&pool)
+    .await?;
+    
+    let index_names: Vec<String> = indexes
+    .iter()
+    .filter_map(|r| r.indexname.clone())
+    .collect();
+    
+    assert!(index_names.iter().any(|name| name.contains("leases_service_id")), "Service ID index should exist");
+    assert!(index_names.iter().any(|name| name.contains("leases_expires_at")), "Expires at index should exist");
+    
+    println!("✅ Required indexes exist");
+    
+    // Test that functions exist
+    let functions = sqlx::query!(
+        "SELECT proname FROM pg_proc WHERE proname IN ('update_service_stats', 'get_lease_statistics', 'cleanup_old_history')"
+    )
+    .fetch_all(&pool)
+    .await?;
+    
+    assert_eq!(functions.len(), 3, "All required functions should exist");
+    println!("✅ All required functions exist");
+    
+    pool.close().await;
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn test_database_triggers() -> Result<()> {
+    println!("🎯 Testing database triggers...");
+    
+    // Skip if no DATABASE_URL is set
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            println!("⚠️  Skipping trigger test - DATABASE_URL not set");
+            return Ok(());
+        }
+    };
+    
+    let pool = sqlx::PgPool::connect(&database_url).await?;
+    
+    let test_service = "trigger-test-service";
+    
+    // Clear any existing stats for our test service
+    sqlx::query("DELETE FROM service_stats WHERE service_id = $1")
+        .bind(test_service)
+        .execute(&pool)
+        .await?;
+    
+    // Insert a lease directly via SQL (this should trigger the function)
+    let lease_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        r#"
+        INSERT INTO leases (lease_id, object_id, object_type, service_id, state, expires_at)
+        VALUES ($1, $2, 1, $3, 0, NOW() + INTERVAL '1 hour')
+        "#
+    )
+    .bind(&lease_id)
+    .bind("trigger-test-object")
+    .bind(test_service)
+    .execute(&pool)
+    .await?;
+    
+    // Check that service stats were automatically updated
+    let stats = sqlx::query(
+        "SELECT * FROM service_stats WHERE service_id = $1"
+    )
+    .bind(test_service)
+    .fetch_optional(&pool)
+    .await?;
+    
+    assert!(stats.is_some(), "Service stats should be created by trigger");
+    let stats = stats.unwrap();
+    let total_created: i32 = stats.try_get("total_leases_created")?;
+    let current_active: i32 = stats.try_get("current_active_leases")?;
+    assert_eq!(total_created, 1, "Total leases created should be 1");
+    assert_eq!(current_active, 1, "Current active leases should be 1");
+    
+    println!("✅ INSERT trigger works correctly");
+    
+    // Test renewal trigger
+    sqlx::query(
+        "UPDATE leases SET last_renewed_at = NOW(), renewal_count = 1 WHERE lease_id = $1"
+    )
+    .bind(&lease_id)
+    .execute(&pool)
+    .await?;
+    
+    let updated_stats = sqlx::query(
+        "SELECT total_leases_renewed FROM service_stats WHERE service_id = $1"
+    )
+    .bind(test_service)
+    .fetch_one(&pool)
+    .await?;
+    
+    let renewed_count: i32 = updated_stats.try_get("total_leases_renewed")?;
+    assert_eq!(renewed_count, 1, "Renewal count should be updated by trigger");
+    println!("✅ UPDATE trigger works correctly");
+    
+    // Test state change trigger (release)
+    sqlx::query(
+        "UPDATE leases SET state = 2 WHERE lease_id = $1" // 2 = Released
+    )
+    .bind(&lease_id)
+    .execute(&pool)
+    .await?;
+    
+    let release_stats = sqlx::query(
+        "SELECT total_leases_released, current_active_leases FROM service_stats WHERE service_id = $1"
+    )
+    .bind(test_service)
+    .fetch_one(&pool)
+    .await?;
+    
+    let released_count: i32 = release_stats.try_get("total_leases_released")?;
+    let active_count: i32 = release_stats.try_get("current_active_leases")?;
+    assert_eq!(released_count, 1, "Released count should be updated");
+    assert_eq!(active_count, 0, "Active count should decrease");
+    println!("✅ State change trigger works correctly");
+    
+    // Clean up
+    sqlx::query("DELETE FROM leases WHERE lease_id = $1")
+        .bind(&lease_id)
+        .execute(&pool).await?;
+    sqlx::query("DELETE FROM service_stats WHERE service_id = $1")
+        .bind(test_service)
+        .execute(&pool).await?;
+    
+    pool.close().await;
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn test_database_functions() -> Result<()> {
+    println!("⚙️ Testing database functions...");
+    
+    // Skip if no DATABASE_URL is set
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            println!("⚠️  Skipping function test - DATABASE_URL not set");
+            return Ok(());
+        }
+    };
+    
+    let pool = sqlx::PgPool::connect(&database_url).await?;
+    
+    // Test get_lease_statistics function
+    let stats = sqlx::query("SELECT * FROM get_lease_statistics()")
+        .fetch_one(&pool)
+        .await?;
+    
+    let total_leases: Option<i64> = stats.try_get("total_leases").ok();
+    let active_leases: Option<i64> = stats.try_get("active_leases").ok();
+    
+    assert!(total_leases.is_some(), "Statistics function should return total leases");
+    println!("✅ get_lease_statistics function works");
+    println!("   Total leases: {:?}", total_leases);
+    println!("   Active leases: {:?}", active_leases);
+    
+    // Test cleanup_old_history function
+    // First, insert some old cleanup history
+    let old_lease_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        r#"
+        INSERT INTO cleanup_history (lease_id, object_id, service_id, cleanup_started_at, success)
+        VALUES ($1, 'old-object', 'old-service', NOW() - INTERVAL '35 days', true)
+        "#
+    )
+    .bind(&old_lease_id)
+    .execute(&pool)
+    .await?;
+    
+    // Run cleanup function
+    let cleanup_result = sqlx::query("SELECT cleanup_old_history() as deleted_count")
+        .fetch_one(&pool)
+        .await?;
+    
+    let deleted_count: Option<i32> = cleanup_result.try_get("deleted_count").ok();
+    assert!(deleted_count.unwrap_or(0) >= 1, "Should delete old history records");
+    println!("✅ cleanup_old_history function works (deleted {} records)", deleted_count.unwrap_or(0));
+    
+    pool.close().await;
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn test_database_performance_indexes() -> Result<()> {
+    println!("⚡ Testing database performance with indexes...");
+    
+    // Skip if no DATABASE_URL is set
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            println!("⚠️  Skipping performance test - DATABASE_URL not set");
+            return Ok(());
+        }
+    };
+    
+    let pool = sqlx::PgPool::connect(&database_url).await?;
+    
+    // Create test data for performance testing
+    let test_service = "perf-test-service";
+    let mut test_lease_ids = Vec::new();
+    
+    // Insert multiple leases for performance testing
+    for i in 0..100 {
+        let lease_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            r#"
+            INSERT INTO leases (lease_id, object_id, object_type, service_id, state, expires_at)
+            VALUES ($1, $2, $3, $4, 0, NOW() + INTERVAL '1 hour')
+            "#
+        )
+        .bind(&lease_id)
+        .bind(&format!("perf-object-{}", i))
+        .bind((i % 6) + 1) // Rotate through object types 1-6
+        .bind(test_service)
+        .execute(&pool)
+        .await?;
+        
+        test_lease_ids.push(lease_id);
+    }
+    
+    // Test query performance with EXPLAIN ANALYZE
+    let explain_result = sqlx::query(
+        r#"
+        EXPLAIN (ANALYZE, BUFFERS) 
+        SELECT * FROM leases 
+        WHERE service_id = $1 AND state = 0 
+        ORDER BY created_at DESC 
+        LIMIT 10
+        "#
+    )
+    .bind(test_service)
+    .fetch_all(&pool)
+    .await?;
+    
+    // Check that the query plan uses an index
+    let plan_text = explain_result.iter()
+        .map(|row| row.try_get::<String, _>("QUERY PLAN").unwrap_or_else(|_| 
+            row.try_get::<String, _>(0).unwrap_or_default()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    
+    assert!(plan_text.contains("Index"), "Query should use an index for better performance");
+    println!("✅ Query uses indexes for performance");
+    
+    // Test concurrent access performance
+    let start_time = std::time::Instant::now();
+    let mut handles = vec![];
+    
+    for i in 0..10 {
+        let pool_clone = pool.clone();
+        let service_clone = test_service.to_string();
+        let handle = tokio::spawn(async move {
+            sqlx::query(
+                "SELECT COUNT(*) as count FROM leases WHERE service_id = $1 AND object_type = $2"
+            )
+            .bind(&service_clone)
+            .bind((i % 6) + 1)
+            .fetch_one(&pool_clone)
+            .await
+        });
+        handles.push(handle);
+    }
+    
+    // Wait for all queries to complete
+    for handle in handles {
+        handle.await??;
+    }
+    
+    let duration = start_time.elapsed();
+    println!("✅ Concurrent queries completed in {:?}", duration);
+    assert!(duration.as_millis() < 1000, "Concurrent queries should complete quickly");
+    
+    // Clean up test data
+    for lease_id in test_lease_ids {
+        sqlx::query("DELETE FROM leases WHERE lease_id = $1")
+            .bind(&lease_id)
+            .execute(&pool)
+            .await?;
+    }
+    
+    sqlx::query("DELETE FROM service_stats WHERE service_id = $1")
+        .bind(test_service)
+        .execute(&pool)
+        .await?;
+    
+    pool.close().await;
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn test_database_constraints_and_validation() -> Result<()> {
+    println!("🔒 Testing database constraints and validation...");
+    
+    // Skip if no DATABASE_URL is set
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            println!("⚠️  Skipping constraint test - DATABASE_URL not set");
+            return Ok(());
+        }
+    };
+    
+    let pool = sqlx::PgPool::connect(&database_url).await?;
+    
+    // Test primary key constraint
+    let lease_id = Uuid::new_v4().to_string();
+    
+    // Insert first lease
+    sqlx::query(
+        r#"
+        INSERT INTO leases (lease_id, object_id, object_type, service_id, state, expires_at)
+        VALUES ($1, 'constraint-test-1', 1, 'constraint-service', 0, NOW() + INTERVAL '1 hour')
+        "#
+    )
+    .bind(&lease_id)
+    .execute(&pool)
+    .await?;
+    
+    // Try to insert duplicate lease_id (should fail)
+    let duplicate_result = sqlx::query(
+        r#"
+        INSERT INTO leases (lease_id, object_id, object_type, service_id, state, expires_at)
+        VALUES ($1, 'constraint-test-2', 1, 'constraint-service', 0, NOW() + INTERVAL '1 hour')
+        "#
+    )
+    .bind(&lease_id)
+    .execute(&pool)
+    .await;
+    
+    assert!(duplicate_result.is_err(), "Duplicate lease_id should be rejected");
+    println!("✅ Primary key constraint works");
+    
+    // Test NOT NULL constraints
+    let null_object_result = sqlx::query(
+        r#"
+        INSERT INTO leases (lease_id, object_id, object_type, service_id, state, expires_at)
+        VALUES ($1, NULL, 1, 'constraint-service', 0, NOW() + INTERVAL '1 hour')
+        "#
+    )
+    .bind(&Uuid::new_v4().to_string())
+    .execute(&pool)
+    .await;
+    
+    assert!(null_object_result.is_err(), "NULL object_id should be rejected");
+    println!("✅ NOT NULL constraints work");
+    
+    // Test default values
+    let minimal_lease_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        r#"
+        INSERT INTO leases (lease_id, object_id, object_type, service_id, expires_at)
+        VALUES ($1, 'minimal-test', 1, 'constraint-service', NOW() + INTERVAL '1 hour')
+        "#
+    )
+    .bind(&minimal_lease_id)
+    .execute(&pool)
+    .await?;
+    
+    let minimal_lease = sqlx::query(
+        "SELECT state, renewal_count, metadata FROM leases WHERE lease_id = $1"
+    )
+    .bind(&minimal_lease_id)
+    .fetch_one(&pool)
+    .await?;
+    
+    let state: i32 = minimal_lease.try_get("state")?;
+    let renewal_count: i32 = minimal_lease.try_get("renewal_count")?;
+    let metadata: serde_json::Value = minimal_lease.try_get("metadata")?;
+    
+    assert_eq!(state, 0, "Default state should be 0 (Active)");
+    assert_eq!(renewal_count, 0, "Default renewal_count should be 0");
+    assert_eq!(metadata, serde_json::json!({}), "Default metadata should be empty object");
+    
+    println!("✅ Default values work correctly");
+    
+    // Clean up
+    sqlx::query("DELETE FROM leases WHERE lease_id = $1")
+        .bind(&lease_id)
+        .execute(&pool).await?;
+    sqlx::query("DELETE FROM leases WHERE lease_id = $1")
+        .bind(&minimal_lease_id)
+        .execute(&pool).await?;
+    
+    pool.close().await;
+    Ok(())
+}
+
+// =============================================================================
+// Cross-Backend Consistency Tests
+// =============================================================================
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn test_storage_backend_consistency() -> Result<()> {
+    println!("🔄 Testing storage backend consistency...");
+    
+    // Test data that should behave the same across backends
+    let test_lease = create_test_lease_data("consistency-test", "consistency-service", 300);
+    
+    // Test memory storage
+    let memory_storage = MemoryStorage::new();
+    memory_storage.create_lease(test_lease.clone()).await?;
+    
+    let memory_result = memory_storage.get_lease(&test_lease.lease_id).await?;
+    assert!(memory_result.is_some(), "Memory storage should store and retrieve lease");
+    
+    let memory_stats = memory_storage.get_stats().await?;
+    assert_eq!(memory_stats.total_leases, 1, "Memory storage should count 1 lease");
+    
+    println!("✅ Memory storage consistency verified");
+    
+    // Test PostgreSQL storage (if available)
+    #[cfg(feature = "postgres")]
+    {
+        if let Ok(database_url) = std::env::var("DATABASE_URL") {
+            let postgres_storage = PostgresStorage::new(&database_url, 5).await?;
+            
+            let pg_test_lease = create_test_lease_data("pg-consistency-test", "pg-consistency-service", 300);
+            postgres_storage.create_lease(pg_test_lease.clone()).await?;
+            
+            let postgres_result = postgres_storage.get_lease(&pg_test_lease.lease_id).await?;
+            assert!(postgres_result.is_some(), "PostgreSQL storage should store and retrieve lease");
+            
+            let postgres_stats = postgres_storage.get_stats().await?;
+            assert!(postgres_stats.total_leases >= 1, "PostgreSQL storage should count leases");
+            
+            // Clean up
+            let _ = postgres_storage.delete_lease(&pg_test_lease.lease_id).await;
+            
+            println!("✅ PostgreSQL storage consistency verified");
+        } else {
+            println!("⚠️  Skipping PostgreSQL consistency test - DATABASE_URL not set");
+        }
+    }
+    
+    Ok(())
+}
+
+// =============================================================================
+// Test Suite Summary
+// =============================================================================
+
+#[tokio::test]
+#[ignore = "summary"] // Use ignore to make this optional
+async fn test_suite_summary() -> Result<()> {
+    println!("📋 Test Suite Summary");
+    println!("====================");
+    println!("✅ Storage Layer Tests:");
+    println!("   • Memory storage basic operations");
+    println!("   • Memory storage filtering and listing");  
+    println!("   • Memory storage expired lease handling");
+    println!("   • Memory storage statistics");
+    println!("   • Storage factory pattern");
+    println!("");
+    
+    #[cfg(feature = "postgres")]
+    {
+        println!("✅ PostgreSQL Tests:");
+        println!("   • Basic CRUD operations");
+        println!("   • Advanced queries and filtering");
+        println!("   • Concurrent operations");
+        println!("   • Schema integrity");
+        println!("   • Database triggers");
+        println!("   • Database functions");
+        println!("   • Performance indexes");
+        println!("   • Constraints and validation");
+        println!("");
+    }
+    
+    println!("✅ gRPC Service Tests:");
+    println!("   • Health check");
+    println!("   • Lease CRUD operations via gRPC");
+    println!("   • Authorization and security");
+    println!("   • Concurrent gRPC operations");
+    println!("   • Automatic cleanup processes");
+    println!("   • Metrics collection");
+    println!("");
+    
+    println!("✅ Integration Tests:");
+    println!("   • End-to-end lease lifecycle");
+    println!("   • Cleanup server integration");
+    println!("   • Error handling and edge cases");
+    println!("   • Cross-backend consistency");
+    println!("");
+    
+    println!("🎯 To run all tests:");
+    println!("   cargo test --features postgres  # Full test suite");
+    println!("   cargo test                      # Memory-only tests");
+    println!("   make test-integration           # Integration tests");
     
     Ok(())
 }

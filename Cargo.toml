@@ -81,7 +81,8 @@ tonic-build = "0.12"
 
 [features]
 # Enable postgres by default, make it optional for builds without database
-default = ["postgres"]
+default = []
+grpc = []
 postgres = ["sqlx"]
 
 [[bin]]
