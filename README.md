@@ -111,13 +111,17 @@ cd distributed-gc-sidecar
 cargo build --release
 ```
 
-2. **Start the service**
+2. **Start the service locally**
 ```bash
-# Start with debug logging
 RUST_LOG=distributed_gc_sidecar=info ./target/release/gc-sidecar
 ```
 
-3. **Install grpcurl for testing**
+3. **Start the service via Docker-Compose (Includes PostgreSQL, Prometheus, and Grafana Support)**
+```bash
+docker-compose up --build
+```
+
+4. **Install grpcurl for testing**
 ```bash
 # On macOS
 brew install grpcurl
@@ -208,6 +212,13 @@ docker exec -i sqlx-test-db psql -U testuser -d testdb < migrations/001_initial.
 
 ```bash
 cargo test
+```
+
+### 6. Reset the database
+```bash
+docker exec -it sqlx-test-db psql -U testuser -d postgres -c 'DROP DATABASE IF EXISTS testdb;'
+docker exec -it sqlx-test-db psql -U testuser -d postgres -c 'CREATE DATABASE testdb;'
+psql $DATABASE_URL -f migrations/001_initial.sql
 ```
 
 ## ⚙️ Configuration

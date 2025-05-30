@@ -83,7 +83,7 @@ tonic-build = "0.12"
 # Enable postgres by default, make it optional for builds without database
 default = []
 grpc = []
-postgres = ["sqlx"]
+postgres = ["sqlx/postgres", "sqlx/runtime-tokio-native-tls"]
 
 [[bin]]
 name = "gc-sidecar"

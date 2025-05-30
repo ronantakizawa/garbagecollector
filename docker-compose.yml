@@ -1,226 +1,77 @@
-version: '3.8'
-
 services:
-  # Distributed GC Sidecar Service
+  postgres:
+    image: postgres:16
+    container_name: gc_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: testdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    command: >
+      bash -c "
+        docker-entrypoint.sh postgres &
+        pid=$!;
+        # Wait for PostgreSQL to accept connections
+        for i in {1..30}; do
+          pg_isready -U testuser -d postgres && break;
+          sleep 1;
+        done;
+        # Create the 'testuser' database if it doesn't exist
+        psql -U testuser -d postgres -c 'CREATE DATABASE testuser;' || true;
+        wait $pid
+      "
+
   gc-sidecar:
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      - "50051:50051"  # gRPC port
-      - "9090:9090"    # Metrics port
-    environment:
-      # Server configuration
-      - GC_SERVER_HOST=0.0.0.0
-      - GC_SERVER_PORT=50051
-      
-      # GC configuration
-      - GC_DEFAULT_LEASE_DURATION=300      # 5 minutes
-      - GC_MAX_LEASE_DURATION=3600         # 1 hour
-      - GC_MIN_LEASE_DURATION=30           # 30 seconds
-      - GC_CLEANUP_INTERVAL=60             # 1 minute
-      - GC_CLEANUP_GRACE_PERIOD=30         # 30 seconds
-      - GC_MAX_LEASES_PER_SERVICE=10000
-      
-      # Storage configuration (memory for this example)
-      - GC_STORAGE_BACKEND=memory
-      
-      # Cleanup configuration
-      - GC_CLEANUP_TIMEOUT=30
-      - GC_CLEANUP_MAX_RETRIES=3
-      - GC_CLEANUP_RETRY_DELAY=5
-      
-      # Metrics configuration
-      - GC_METRICS_ENABLED=true
-      - GC_METRICS_PORT=9090
-      
-      # Logging
-      - RUST_LOG=distributed_gc_sidecar=info
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "grpcurl", "-plaintext", "-import-path", "proto", "-proto", "gc_service.proto", "localhost:50051", "distributed_gc.DistributedGCService/HealthCheck"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
-  # Test cleanup service (for demonstration)
-  cleanup-service:
-    image: python:3.11-slim
-    ports:
-      - "8080:8080"
-    command: >
-      bash -c "
-        pip install --no-cache-dir requests &&
-        cat > cleanup_server.py << 'EOF' &&
-        from http.server import HTTPServer, BaseHTTPRequestHandler
-        import json
-        import logging
-        from datetime import datetime
-        
-        logging.basicConfig(level=logging.INFO)
-        logger = logging.getLogger(__name__)
-        
-        class CleanupHandler(BaseHTTPRequestHandler):
-            def do_POST(self):
-                try:
-                    content_length = int(self.headers['Content-Length'])
-                    post_data = self.rfile.read(content_length)
-                    cleanup_request = json.loads(post_data)
-                    
-                    timestamp = datetime.now().isoformat()
-                    logger.info(f'🧹 [{timestamp}] Cleanup request: {cleanup_request}')
-                    
-                    # Simulate cleanup work
-                    import time
-                    time.sleep(0.1)
-                    
-                    self.send_response(200)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({
-                        'success': True,
-                        'message': 'Cleanup completed',
-                        'timestamp': timestamp,
-                        'object_id': cleanup_request.get('object_id')
-                    }).encode())
-                    
-                except Exception as e:
-                    logger.error(f'❌ Cleanup error: {e}')
-                    self.send_response(500)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
-            
-            def do_GET(self):
-                # Health check
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({'status': 'running', 'service': 'cleanup'}).encode())
-            
-            def log_message(self, format, *args):
-                pass
-        
-        if __name__ == '__main__':
-            print('🚀 Starting cleanup service on port 8080')
-            httpd = HTTPServer(('0.0.0.0', 8080), CleanupHandler)
-            httpd.serve_forever()
-        EOF
-        python cleanup_server.py
-      "
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # Test client container (for running tests)
-  test-client:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    entrypoint: /bin/bash
-    command: >
-      -c "
-        echo '🧪 GC Sidecar Test Client Container' &&
-        echo 'Available commands:' &&
-        echo '- ./test-service.sh  # Run basic tests' &&
-        echo '- grpcurl ...        # Manual gRPC calls' &&
-        echo '- /bin/bash          # Interactive shell' &&
-        echo '' &&
-        echo 'Starting interactive shell...' &&
-        /bin/bash
-      "
-    depends_on:
-      - gc-sidecar
-    environment:
-      - GC_SERVICE_URL=gc-sidecar:50051
-      - CLEANUP_SERVICE_URL=cleanup-service:8080
-    profiles:
-      - testing
-
-  # PostgreSQL (optional, for persistent storage testing)
-  postgres:
-    image: postgres:15-alpine
-    environment:
-      - POSTGRES_DB=distributed_gc
-      - POSTGRES_USER=gcuser
-      - POSTGRES_PASSWORD=gcpass
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U gcuser -d distributed_gc"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    restart: unless-stopped
-    profiles:
-      - postgres
-
-  # GC Sidecar with PostgreSQL backend
-  gc-sidecar-postgres:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - "50052:50051"  # Different port to avoid conflicts
-      - "9091:9090"    # Different metrics port
-    environment:
-      - GC_SERVER_HOST=0.0.0.0
-      - GC_SERVER_PORT=50051
-      - GC_STORAGE_BACKEND=postgres
-      - DATABASE_URL=postgresql://gcuser:gcpass@postgres:5432/distributed_gc
-      - GC_MAX_DB_CONNECTIONS=10
-      - RUST_LOG=distributed_gc_sidecar=info
+    container_name: gc_sidecar
     depends_on:
       postgres:
         condition: service_healthy
-    restart: unless-stopped
-    profiles:
-      - postgres
+    environment:
+      GC_SERVER_HOST: 0.0.0.0
+      GC_SERVER_PORT: 50051
+      GC_STORAGE_BACKEND: postgres
+      DATABASE_URL: postgres://testuser:testpass@postgres:5432/testdb
+      GC_MAX_DB_CONNECTIONS: 10
+      # Add any other environment variables here as needed
+    ports:
+      - "50051:50051"
+    volumes:
+      - ./migrations:/app/migrations  # Assuming migrations are needed at runtime
 
-  # Prometheus (optional, for metrics collection)
   prometheus:
     image: prom/prometheus:latest
-    ports:
-      - "9092:9090"  # Different port to avoid conflicts
+    container_name: gc_prometheus
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/etc/prometheus/console_libraries'
-      - '--web.console.templates=/etc/prometheus/consoles'
-      - '--web.enable-lifecycle'
-    restart: unless-stopped
-    profiles:
-      - monitoring
+    ports:
+      - "9090:9090"
+    depends_on:
+      - gc-sidecar
 
-  # Grafana (optional, for metrics visualization)
   grafana:
     image: grafana/grafana:latest
+    container_name: gc_grafana
     ports:
       - "3000:3000"
+    depends_on:
+      - prometheus
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
     volumes:
-      - grafana_data:/var/lib/grafana
-    restart: unless-stopped
-    profiles:
-      - monitoring
+      - grafana-data:/var/lib/grafana
 
 volumes:
-  postgres_data:
-  prometheus_data:
-  grafana_data:
-
-networks:
-  default:
-    name: distributed-gc-network
+  pgdata:
+  grafana-data:

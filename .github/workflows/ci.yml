@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U testuser -d testdb"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      prometheus:
+        image: prom/prometheus:latest
+        ports:
+          - 9090:9090
+        options: --health-cmd="wget --spider -q http://localhost:9090/-/healthy || exit 1"
+                 --health-interval=10s
+                 --health-timeout=5s
+                 --health-retries=5
+        volumes:
+          - ${{ github.workspace }}/prometheus.yml:/etc/prometheus/prometheus.yml
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+            toolchain: stable
+            override: true
+            profile: minimal
+
+      - name: Build Rust app
+        run: cargo build --release
+
+      - name: Run unit tests
+        run: cargo test --all
+
+      - name: Build Docker image
+        run: docker build -t distributed-gc-sidecar:latest .
+
+      - name: Start gc-sidecar and dependencies
+        run: |
+          docker-compose up -d postgres prometheus
+          # Wait for postgres
+          until docker exec gc_postgres pg_isready -U testuser -d testdb; do sleep 2; done
+          docker-compose up -d gc-sidecar
+          sleep 10 # wait for services to be healthy
+
+      - name: Run integration tests
+        run: cargo test --test integration
+
+      - name: Check Prometheus metrics
+        run: |
+          sleep 10
+          curl -s "http://localhost:9090/api/v1/query?query=up" | grep -q '"gc-sidecar"' || (echo "gc-sidecar not registered in Prometheus" && exit 1)
+
+      - name: Tear down
+        if: always()
+        run: docker-compose down -v
