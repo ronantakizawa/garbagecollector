@@ -2,7 +2,8 @@
 
 A high-performance, lease-based distributed garbage collection system for microservices, built with Rust and gRPC. This sidecar service automatically manages cross-service object references and reclaims orphaned resources when leases expire.
 
-<img width="592" alt="Screenshot 2025-05-30 at 12 43 20 PM" src="https://github.com/user-attachments/assets/f745ec72-c6cf-473a-af05-713c2fc1cac2" />
+<img width="856" alt="Screenshot 2025-05-30 at 12 44 26 PM" src="https://github.com/user-attachments/assets/3b50b11b-5040-43d9-92f8-588c87f3f08c" />
+
 
 ## 🎯 Features
 
