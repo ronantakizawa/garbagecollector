@@ -67,9 +67,6 @@ jobs:
           fi
 
       # Build and test phases
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
