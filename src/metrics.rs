@@ -1,3 +1,5 @@
+// src/metrics.rs - Enhanced with startup and configuration metrics
+
 use prometheus::{
     Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter,
     IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
@@ -36,12 +38,25 @@ pub struct Metrics {
     pub storage_operations_total: IntCounterVec,
     pub storage_errors_total: IntCounterVec,
     
-    // New alerting-related metrics
+    // Alerting-related metrics
     pub lease_creation_failures_total: IntCounter,
     pub storage_availability: IntGauge,
     pub consecutive_cleanup_failures: IntGauge,
     pub consecutive_lease_creation_failures: IntGauge,
     pub storage_operation_failures_by_type: IntCounterVec,
+    
+    // NEW: Startup and Configuration metrics
+    pub startup_duration_seconds: Histogram,
+    pub startup_phase_duration: HistogramVec,
+    pub service_ready_timestamp: Gauge,
+    pub configuration_validation_total: IntCounterVec,
+    pub configuration_validation_duration: Histogram,
+    pub configuration_errors_total: IntCounterVec,
+    pub component_initialization_duration: HistogramVec,
+    pub dependencies_check_duration: Histogram,
+    pub service_restarts_total: IntCounter,
+    pub config_reload_total: IntCounterVec,
+    pub startup_errors_total: IntCounterVec,
     
     // Alerting system
     pub alerting: Arc<RwLock<AlertingSystem>>,
@@ -58,12 +73,16 @@ pub struct AlertingSystem {
 
 #[derive(Debug, Clone)]
 pub struct AlertThresholds {
-    pub cleanup_failure_rate_threshold: f64,      // e.g., 0.5 for 50%
-    pub cleanup_failure_window_minutes: u64,      // e.g., 5 minutes
-    pub consecutive_cleanup_failures_threshold: u64, // e.g., 5
-    pub consecutive_lease_failures_threshold: u64,   // e.g., 10
-    pub storage_unavailable_threshold_seconds: u64,  // e.g., 30 seconds
-    pub alert_cooldown_minutes: u64,              // e.g., 15 minutes between same alerts
+    pub cleanup_failure_rate_threshold: f64,
+    pub cleanup_failure_window_minutes: u64,
+    pub consecutive_cleanup_failures_threshold: u64,
+    pub consecutive_lease_failures_threshold: u64,
+    pub storage_unavailable_threshold_seconds: u64,
+    pub alert_cooldown_minutes: u64,
+    // NEW: Startup and config thresholds
+    pub startup_duration_threshold_seconds: f64,
+    pub config_validation_failure_threshold: u64,
+    pub consecutive_startup_failures_threshold: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -73,6 +92,11 @@ pub enum AlertType {
     LeaseCreationFailures,
     StorageBackendUnavailable,
     CriticalSystemError,
+    // NEW: Startup and config alert types
+    SlowStartupTime,
+    ConfigurationValidationFailure,
+    StartupFailure,
+    DependencyCheckFailure,
 }
 
 #[derive(Debug, Clone)]
@@ -110,12 +134,16 @@ pub struct AlertSummary {
 impl Default for AlertThresholds {
     fn default() -> Self {
         Self {
-            cleanup_failure_rate_threshold: 0.5,      // 50% failure rate
-            cleanup_failure_window_minutes: 5,         // in last 5 minutes
-            consecutive_cleanup_failures_threshold: 5,  // 5 consecutive failures
-            consecutive_lease_failures_threshold: 10,   // 10 consecutive failures
-            storage_unavailable_threshold_seconds: 30,  // 30 seconds of unavailability
-            alert_cooldown_minutes: 15,                // 15 minutes between same alerts
+            cleanup_failure_rate_threshold: 0.5,
+            cleanup_failure_window_minutes: 5,
+            consecutive_cleanup_failures_threshold: 5,
+            consecutive_lease_failures_threshold: 10,
+            storage_unavailable_threshold_seconds: 30,
+            alert_cooldown_minutes: 15,
+            // NEW: Default thresholds for startup and config
+            startup_duration_threshold_seconds: 30.0, // Alert if startup takes >30 seconds
+            config_validation_failure_threshold: 3,    // Alert after 3 consecutive failures
+            consecutive_startup_failures_threshold: 3, // Alert after 3 consecutive startup failures
         }
     }
 }
@@ -344,7 +372,7 @@ impl Metrics {
         )?;
         registry.register(Box::new(storage_errors_total.clone()))?;
         
-        // New alerting-related metrics
+        // Alerting-related metrics
         let lease_creation_failures_total = IntCounter::new(
             "gc_lease_creation_failures_total",
             "Total number of lease creation failures"
@@ -375,6 +403,85 @@ impl Metrics {
         )?;
         registry.register(Box::new(storage_operation_failures_by_type.clone()))?;
         
+        // NEW: Startup and Configuration metrics
+        let startup_duration_seconds = Histogram::with_opts(
+            HistogramOpts::new(
+                "gc_startup_duration_seconds",
+                "Time taken for complete service startup in seconds"
+            ).buckets(vec![0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0])
+        )?;
+        registry.register(Box::new(startup_duration_seconds.clone()))?;
+        
+        let startup_phase_duration = HistogramVec::new(
+            HistogramOpts::new(
+                "gc_startup_phase_duration_seconds",
+                "Duration of individual startup phases in seconds"
+            ).buckets(vec![0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0]),
+            &["phase"]
+        )?;
+        registry.register(Box::new(startup_phase_duration.clone()))?;
+        
+        let service_ready_timestamp = Gauge::new(
+            "gc_service_ready_timestamp",
+            "Unix timestamp when service became ready"
+        )?;
+        registry.register(Box::new(service_ready_timestamp.clone()))?;
+        
+        let configuration_validation_total = IntCounterVec::new(
+            Opts::new("gc_configuration_validation_total", "Total configuration validation attempts"),
+            &["result"] // "success" or "failure"
+        )?;
+        registry.register(Box::new(configuration_validation_total.clone()))?;
+        
+        let configuration_validation_duration = Histogram::with_opts(
+            HistogramOpts::new(
+                "gc_configuration_validation_duration_seconds",
+                "Time taken to validate configuration in seconds"
+            ).buckets(vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0])
+        )?;
+        registry.register(Box::new(configuration_validation_duration.clone()))?;
+        
+        let configuration_errors_total = IntCounterVec::new(
+            Opts::new("gc_configuration_errors_total", "Total configuration errors by type"),
+            &["error_type"]
+        )?;
+        registry.register(Box::new(configuration_errors_total.clone()))?;
+        
+        let component_initialization_duration = HistogramVec::new(
+            HistogramOpts::new(
+                "gc_component_initialization_duration_seconds",
+                "Time taken to initialize individual components in seconds"
+            ).buckets(vec![0.1, 0.5, 1.0, 2.0, 5.0, 10.0]),
+            &["component"]
+        )?;
+        registry.register(Box::new(component_initialization_duration.clone()))?;
+        
+        let dependencies_check_duration = Histogram::with_opts(
+            HistogramOpts::new(
+                "gc_dependencies_check_duration_seconds",
+                "Time taken to check external dependencies in seconds"
+            ).buckets(vec![0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0])
+        )?;
+        registry.register(Box::new(dependencies_check_duration.clone()))?;
+        
+        let service_restarts_total = IntCounter::new(
+            "gc_service_restarts_total",
+            "Total number of service restarts"
+        )?;
+        registry.register(Box::new(service_restarts_total.clone()))?;
+        
+        let config_reload_total = IntCounterVec::new(
+            Opts::new("gc_config_reload_total", "Total configuration reload attempts"),
+            &["result"] // "success" or "failure"
+        )?;
+        registry.register(Box::new(config_reload_total.clone()))?;
+        
+        let startup_errors_total = IntCounterVec::new(
+            Opts::new("gc_startup_errors_total", "Total startup errors by phase"),
+            &["phase", "error_type"]
+        )?;
+        registry.register(Box::new(startup_errors_total.clone()))?;
+        
         // Initialize storage as available
         storage_availability.set(1);
         
@@ -402,10 +509,156 @@ impl Metrics {
             consecutive_cleanup_failures,
             consecutive_lease_creation_failures,
             storage_operation_failures_by_type,
+            startup_duration_seconds,
+            startup_phase_duration,
+            service_ready_timestamp,
+            configuration_validation_total,
+            configuration_validation_duration,
+            configuration_errors_total,
+            component_initialization_duration,
+            dependencies_check_duration,
+            service_restarts_total,
+            config_reload_total,
+            startup_errors_total,
             alerting: Arc::new(RwLock::new(AlertingSystem::new().with_thresholds(thresholds))),
         })
     }
     
+    // NEW: Startup and Configuration metric methods
+    pub fn record_startup_duration(&self, duration: Duration) {
+        let duration_secs = duration.as_secs_f64();
+        self.startup_duration_seconds.observe(duration_secs);
+        
+        // Check if startup was slow and trigger alert
+        let alerting = self.alerting.clone();
+        tokio::spawn(async move {
+            let alerting_guard = alerting.read().await;
+            if duration_secs > alerting_guard.thresholds.startup_duration_threshold_seconds {
+                drop(alerting_guard); // Release read lock
+                let mut alerting = alerting.write().await;
+                let alert = Alert {
+                    alert_type: AlertType::SlowStartupTime,
+                    severity: AlertSeverity::Warning,
+                    message: format!("Service startup took {:.2} seconds, which exceeds threshold of {:.2} seconds", 
+                                   duration_secs, alerting.thresholds.startup_duration_threshold_seconds),
+                    details: [
+                        ("startup_duration_seconds".to_string(), duration_secs.to_string()),
+                        ("threshold_seconds".to_string(), alerting.thresholds.startup_duration_threshold_seconds.to_string()),
+                    ].into(),
+                    created_at: Instant::now(),
+                };
+                alerting.trigger_alert(alert);
+            }
+        });
+    }
+    
+    pub fn record_startup_phase(&self, phase: &str, duration: Duration) {
+        self.startup_phase_duration
+            .with_label_values(&[phase])
+            .observe(duration.as_secs_f64());
+    }
+    
+    pub fn record_service_ready(&self) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as f64;
+        self.service_ready_timestamp.set(timestamp);
+    }
+    
+    pub fn record_config_validation(&self, success: bool, duration: Duration, error_type: Option<&str>) {
+        let result = if success { "success" } else { "failure" };
+        self.configuration_validation_total.with_label_values(&[result]).inc();
+        self.configuration_validation_duration.observe(duration.as_secs_f64());
+        
+        if !success {
+            if let Some(error_type) = error_type {
+                self.configuration_errors_total.with_label_values(&[error_type]).inc();
+            }
+            
+            // Track consecutive failures and trigger alerts
+            let alerting = self.alerting.clone();
+            let error_type = error_type.unwrap_or("unknown").to_string();
+            tokio::spawn(async move {
+                let mut alerting = alerting.write().await;
+                alerting.increment_consecutive_failures("config_validation");
+                let consecutive_count = alerting.get_consecutive_failures("config_validation");
+                
+                if consecutive_count >= alerting.thresholds.config_validation_failure_threshold {
+                    let alert = Alert {
+                        alert_type: AlertType::ConfigurationValidationFailure,
+                        severity: AlertSeverity::Critical,
+                        message: format!("Configuration validation failed {} consecutive times", consecutive_count),
+                        details: [
+                            ("consecutive_failures".to_string(), consecutive_count.to_string()),
+                            ("error_type".to_string(), error_type),
+                            ("threshold".to_string(), alerting.thresholds.config_validation_failure_threshold.to_string()),
+                        ].into(),
+                        created_at: Instant::now(),
+                    };
+                    alerting.trigger_alert(alert);
+                }
+            });
+        } else {
+            // Reset consecutive failures on success
+            let alerting = self.alerting.clone();
+            tokio::spawn(async move {
+                let mut alerting = alerting.write().await;
+                alerting.reset_consecutive_failures("config_validation");
+            });
+        }
+    }
+    
+    pub fn record_component_initialization(&self, component: &str, duration: Duration) {
+        self.component_initialization_duration
+            .with_label_values(&[component])
+            .observe(duration.as_secs_f64());
+    }
+    
+    pub fn record_dependencies_check(&self, duration: Duration) {
+        self.dependencies_check_duration.observe(duration.as_secs_f64());
+    }
+    
+    pub fn record_service_restart(&self) {
+        self.service_restarts_total.inc();
+    }
+    
+    pub fn record_config_reload(&self, success: bool) {
+        let result = if success { "success" } else { "failure" };
+        self.config_reload_total.with_label_values(&[result]).inc();
+    }
+    
+    pub fn record_startup_error(&self, phase: &str, error_type: &str) {
+        self.startup_errors_total.with_label_values(&[phase, error_type]).inc();
+        
+        // Track consecutive startup failures
+        let alerting = self.alerting.clone();
+        let phase = phase.to_string();
+        let error_type = error_type.to_string();
+        tokio::spawn(async move {
+            let mut alerting = alerting.write().await;
+            alerting.increment_consecutive_failures("startup");
+            let consecutive_count = alerting.get_consecutive_failures("startup");
+            
+            if consecutive_count >= alerting.thresholds.consecutive_startup_failures_threshold {
+                let alert = Alert {
+                    alert_type: AlertType::StartupFailure,
+                    severity: AlertSeverity::Fatal,
+                    message: format!("Service startup failed {} consecutive times", consecutive_count),
+                    details: [
+                        ("consecutive_failures".to_string(), consecutive_count.to_string()),
+                        ("phase".to_string(), phase),
+                        ("error_type".to_string(), error_type),
+                        ("threshold".to_string(), alerting.thresholds.consecutive_startup_failures_threshold.to_string()),
+                    ].into(),
+                    created_at: Instant::now(),
+                };
+                alerting.trigger_alert(alert);
+            }
+        });
+    }
+    
+    // Existing methods remain unchanged...
     pub fn lease_created(&self, service_id: &str, object_type: &str) {
         self.leases_created_total.inc();
         self.active_leases.inc();

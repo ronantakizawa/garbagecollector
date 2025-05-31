@@ -195,7 +195,7 @@ impl PostgresStorage {
     pub async fn new(database_url: &str, max_connections: u32) -> Result<Self> {
         let options = PgConnectOptions::from_str(database_url)
             .map_err(|e| GCError::Database(e.to_string()))?
-            .application_name("distributed-gc-sidecar");
+            .application_name("garbage-truck");
             
         let pool = sqlx::pool::PoolOptions::new()
             .max_connections(max_connections)

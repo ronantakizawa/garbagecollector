@@ -4,10 +4,20 @@ A high-performance, lease-based distributed garbage collection system for micros
 
 <img width="856" alt="Screenshot 2025-05-30 at 12 44 26 PM" src="https://github.com/user-attachments/assets/3b50b11b-5040-43d9-92f8-588c87f3f08c" />
 
+## The Problem it Solves
+
+In modern apps with multiple services, temporary files, cache entries, and database records get "orphaned" where nobody remembers to clean them up, so they pile up forever. Most databases don't auto-cleanup, and even if they did 
+GarbageTruck acts like a smart janitor for your system. It hands out time-limited "leases" to services for the resources they create. If a service crashes or fails to renew the lease, the associated resources are automatically reclaimed.
+
+**Without GarbageTruck:**  
+User uploads a file → Processing service crashes → File remains forever  
+**Result:** Disk fills up with abandoned files
+
+**With GarbageTruck:**  
+User uploads a file → Service receives a 1-hour lease → Service crashes → File is auto-deleted after 1 hour  
+**Result:** Clean system, no orphaned resources
 
 ## 🎯 Features
-
-### Core Functionality
 - **Lease-Based GC**: Time-boxed leases for object references with automatic expiration
 - **Cross-Service Management**: Handle references between microservices safely
 - **Automatic Cleanup**: Configurable cleanup operations for different resource types
@@ -129,6 +139,121 @@ brew install grpcurl
 
 # On Ubuntu/Debian  
 sudo apt-get install grpcurl
+```
+
+### SDK Usage Patterns
+
+#### 1. Temporary File Management
+```rust
+use garbagetruck::GCClient;
+
+async fn process_upload() -> Result> {
+    let mut client = GCClient::new("http://localhost:50051", "upload-service".to_string()).await?;
+    
+    // Create a temporary file lease with automatic cleanup
+    let lease_id = client.create_temp_file_lease(
+        "/tmp/user-upload-123.jpg".to_string(),
+        3600, // Delete after 1 hour
+        Some("http://my-service/cleanup-file".to_string()) // Cleanup endpoint
+    ).await?;
+    
+    // Process the file...
+    process_image("/tmp/user-upload-123.jpg").await?;
+    
+    // File will be automatically deleted after 1 hour, or we can release early
+    client.release_lease(lease_id).await?;
+    
+    Ok(())
+}
+```
+
+#### 2. Database Row Protection
+```rust
+async fn create_user_session() -> Result> {
+    let mut client = GCClient::new("http://localhost:50051", "auth-service".to_string()).await?;
+    
+    // Protect a database row with automatic cleanup
+    let lease_id = client.create_db_row_lease(
+        "user_sessions".to_string(),
+        session_id.to_string(),
+        1800, // 30 minutes
+        Some("http://auth-service/cleanup-session".to_string())
+    ).await?;
+    
+    // Session is now protected - if service crashes, it will be cleaned up automatically
+    
+    // Extend session if user is active
+    client.renew_lease(lease_id.clone(), 1800).await?;
+    
+    // Clean up when user logs out
+    client.release_lease(lease_id).await?;
+    
+    Ok(())
+}
+```
+
+#### 3. Blob Storage Management
+```rust
+async fn upload_temp_file() -> Result> {
+    let mut client = GCClient::new("http://localhost:50051", "storage-service".to_string()).await?;
+    
+    // Upload file to S3
+    let s3_key = upload_to_s3(file_data).await?;
+    
+    // Create lease for the uploaded blob
+    let lease_id = client.create_blob_lease(
+        "temp-uploads".to_string(),
+        s3_key.clone(),
+        7200, // 2 hours
+        Some("http://storage-service/delete-s3-object".to_string())
+    ).await?;
+    
+    // Process the uploaded file...
+    let result = process_uploaded_file(&s3_key).await?;
+    
+    if result.should_keep {
+        // Move to permanent storage and release lease
+        move_to_permanent_storage(&s3_key).await?;
+        client.release_lease(lease_id).await?;
+    } else {
+        // Just release - file will be cleaned up automatically
+        client.release_lease(lease_id).await?;
+    }
+    
+    Ok(())
+}
+```
+
+#### 4. WebSocket Session Management
+```rust
+async fn handle_websocket_connection(session_id: String, user_id: String) -> Result> {
+    let mut client = GCClient::new("http://localhost:50051", "websocket-service".to_string()).await?;
+    
+    // Create session lease with auto-cleanup on disconnect
+    let lease_id = client.create_session_lease(
+        session_id.clone(),
+        user_id.clone(),
+        300, // 5 minute timeout
+        Some("http://websocket-service/force-disconnect".to_string())
+    ).await?;
+    
+    // Keep renewing lease while connection is active
+    loop {
+        tokio::select! {
+            // Renew lease on each message
+            _ = receive_message() => {
+                client.renew_lease(lease_id.clone(), 300).await?;
+            }
+            // Or handle disconnect
+            _ = connection_closed() => {
+                client.release_lease(lease_id).await?;
+                break;
+            }
+        }
+    }
+    
+    Ok(())
+}
 ```
 
 ### Basic Testing

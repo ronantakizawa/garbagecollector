@@ -1,10 +1,12 @@
+// src/service.rs - Enhanced with startup metrics integration
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 
 use crate::cleanup::CleanupExecutor;
-use crate::config::Config;
+use crate::config::{Config, ValidationResult};
 use crate::error::{GCError, Result};
 use crate::lease::{Lease, LeaseFilter, ObjectType, LeaseState, CleanupConfig};
 use crate::metrics::{Metrics, AlertThresholds};
@@ -17,6 +19,7 @@ use crate::proto::{
 };
 use crate::storage::{create_storage, Storage};
 
+/// GarbageTruck service implementation with enhanced startup and configuration metrics
 #[derive(Clone)]
 pub struct GCService {
     config: Config,
@@ -27,17 +30,42 @@ pub struct GCService {
 }
 
 impl GCService {
+    /// Create a new GarbageTruck service instance with detailed startup tracking
     pub async fn new(config: Config) -> Result<Self> {
-        config.validate().map_err(|e| GCError::Configuration(e.to_string()))?;
+        let service_creation_start = Instant::now();
         
-        let storage = create_storage(&config).await?;
-        let cleanup_executor = CleanupExecutor::new(
-            Duration::from_secs(config.cleanup.default_timeout_seconds),
-            config.cleanup.default_max_retries,
-            Duration::from_secs(config.cleanup.default_retry_delay_seconds),
-        );
+        // Phase 1: Validate configuration and record metrics
+        let config_validation_start = Instant::now();
+        let validation_result = config.validate_detailed();
+        let config_validation_duration = config_validation_start.elapsed();
         
-        // Create metrics with custom alerting thresholds
+        if !validation_result.success {
+            // Create metrics even for failed validation to record the failure
+            let metrics = Arc::new(
+                Metrics::with_alerting_thresholds(AlertThresholds::default())
+                    .map_err(|e| GCError::Internal(e.to_string()))?
+            );
+            
+            // Record configuration validation failure
+            let error_type = validation_result.errors.first()
+                .map(|e| e.error_type.as_str())
+                .unwrap_or("unknown");
+            
+            metrics.record_config_validation(false, config_validation_duration, Some(error_type));
+            
+            return Err(GCError::Configuration(format!(
+                "Configuration validation failed: {}",
+                validation_result.errors.iter()
+                    .map(|e| format!("{}: {}", e.field, e.message))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        
+        info!("✅ Configuration validation passed in {:.3}s", config_validation_duration.as_secs_f64());
+        
+        // Phase 2: Create metrics system
+        let metrics_creation_start = Instant::now();
         let alerting_thresholds = AlertThresholds {
             cleanup_failure_rate_threshold: 0.5,
             cleanup_failure_window_minutes: 5,
@@ -45,15 +73,78 @@ impl GCService {
             consecutive_lease_failures_threshold: 10,
             storage_unavailable_threshold_seconds: 30,
             alert_cooldown_minutes: 15,
+            startup_duration_threshold_seconds: 30.0,
+            config_validation_failure_threshold: 3,
+            consecutive_startup_failures_threshold: 3,
         };
         
         let metrics = Arc::new(
             Metrics::with_alerting_thresholds(alerting_thresholds)
                 .map_err(|e| GCError::Internal(e.to_string()))?
         );
+        let metrics_creation_duration = metrics_creation_start.elapsed();
         
-        // Start the alerting monitor
+        // Record successful configuration validation
+        metrics.record_config_validation(true, config_validation_duration, None);
+        metrics.record_component_initialization("metrics_system", metrics_creation_duration);
+        
+        // Phase 3: Create storage backend
+        let storage_creation_start = Instant::now();
+        let storage = match create_storage(&config).await {
+            Ok(storage) => {
+                let storage_creation_duration = storage_creation_start.elapsed();
+                metrics.record_component_initialization("storage_backend", storage_creation_duration);
+                info!("✅ Storage backend '{}' initialized in {:.3}s", 
+                      config.storage.backend, storage_creation_duration.as_secs_f64());
+                storage
+            }
+            Err(e) => {
+                let storage_creation_duration = storage_creation_start.elapsed();
+                metrics.record_startup_error("storage_creation", "storage_creation_failed");
+                error!("❌ Failed to create storage backend after {:.3}s: {}", 
+                       storage_creation_duration.as_secs_f64(), e);
+                return Err(e);
+            }
+        };
+        
+        // Phase 4: Create cleanup executor
+        let cleanup_creation_start = Instant::now();
+        let cleanup_executor = CleanupExecutor::new(
+            Duration::from_secs(config.cleanup.default_timeout_seconds),
+            config.cleanup.default_max_retries,
+            Duration::from_secs(config.cleanup.default_retry_delay_seconds),
+        );
+        let cleanup_creation_duration = cleanup_creation_start.elapsed();
+        metrics.record_component_initialization("cleanup_executor", cleanup_creation_duration);
+        
+        // Phase 5: Start alerting monitor
+        let alerting_start = Instant::now();
         let _alerting_handle = metrics.start_alerting_monitor();
+        let alerting_duration = alerting_start.elapsed();
+        metrics.record_component_initialization("alerting_monitor", alerting_duration);
+        
+        let total_service_creation_duration = service_creation_start.elapsed();
+        
+        info!("✅ GarbageTruck service components initialized in {:.3}s", 
+              total_service_creation_duration.as_secs_f64());
+        
+        // Log component breakdown
+        info!("📊 Service creation breakdown:");
+        info!("   • Config validation: {:.3}s", config_validation_duration.as_secs_f64());
+        info!("   • Metrics system: {:.3}s", metrics_creation_duration.as_secs_f64());
+        info!("   • Storage backend: {:.3}s", storage_creation_start.elapsed().as_secs_f64());
+        info!("   • Cleanup executor: {:.3}s", cleanup_creation_duration.as_secs_f64());
+        info!("   • Alerting monitor: {:.3}s", alerting_duration.as_secs_f64());
+        
+        // Log configuration summary
+        let config_summary = config.summary();
+        info!("📋 Service configuration:");
+        info!("   • Server: {}", config_summary.server_endpoint);
+        info!("   • Storage: {} (DB: {})", config_summary.storage_backend, config_summary.has_database_url);
+        info!("   • Lease duration: {}s (default)", config_summary.default_lease_duration);
+        info!("   • Cleanup interval: {}s", config_summary.cleanup_interval);
+        info!("   • Max leases/service: {}", config_summary.max_leases_per_service);
+        info!("   • Metrics: {} (port: {:?})", config_summary.metrics_enabled, config_summary.metrics_port);
         
         Ok(Self {
             config,
@@ -69,6 +160,7 @@ impl GCService {
         self.metrics.clone()
     }
     
+    /// Start the automatic cleanup loop with enhanced metrics
     pub async fn start_cleanup_loop(&self) {
         let mut interval = tokio::time::interval(self.config.cleanup_interval());
         let grace_period = self.config.cleanup_grace_period();
@@ -76,7 +168,7 @@ impl GCService {
         info!(
             interval_seconds = self.config.gc.cleanup_interval_seconds,
             grace_period_seconds = self.config.gc.cleanup_grace_period_seconds,
-            "Starting cleanup loop"
+            "Starting GarbageTruck cleanup loop"
         );
         
         loop {
@@ -89,11 +181,11 @@ impl GCService {
                     debug!(
                         cleaned_count = cleaned_count,
                         duration_ms = duration.as_millis(),
-                        "Cleanup cycle completed"
+                        "GarbageTruck cleanup cycle completed"
                     );
                 }
                 Err(e) => {
-                    error!(error = %e, "Cleanup cycle failed");
+                    error!(error = %e, "GarbageTruck cleanup cycle failed");
                     self.metrics.record_storage_error(
                         "cleanup_cycle",
                         &self.config.storage.backend,
@@ -104,7 +196,10 @@ impl GCService {
         }
     }
     
+    /// Run a single cleanup cycle with enhanced error tracking
     async fn run_cleanup_cycle(&self, grace_period: Duration) -> Result<usize> {
+        let cycle_start = Instant::now();
+        
         // Get expired leases that need cleanup
         let expired_leases = match self.storage.get_expired_leases(grace_period).await {
             Ok(leases) => {
@@ -127,8 +222,10 @@ impl GCService {
         
         info!(count = expired_leases.len(), "Found expired leases to clean up");
         
-        // Execute cleanup operations
+        // Execute cleanup operations with timing
+        let cleanup_start = Instant::now();
         let cleanup_results = self.cleanup_executor.cleanup_batch(expired_leases.clone()).await;
+        let cleanup_duration = cleanup_start.elapsed();
         
         let mut successful_cleanups = 0;
         let mut failed_cleanups = 0;
@@ -193,21 +290,28 @@ impl GCService {
             }
         }
         
+        let total_cycle_duration = cycle_start.elapsed();
+        
         info!(
             successful = successful_cleanups,
             failed = failed_cleanups,
-            "Cleanup cycle completed"
+            total_duration_ms = total_cycle_duration.as_millis(),
+            cleanup_duration_ms = cleanup_duration.as_millis(),
+            "GarbageTruck cleanup cycle completed"
         );
         
         Ok(successful_cleanups)
     }
     
+    /// Validate incoming lease creation requests with enhanced error categorization
     fn validate_lease_request(&self, request: &CreateLeaseRequest) -> Result<()> {
         if request.object_id.is_empty() {
+            self.metrics.record_startup_error("lease_validation", "empty_object_id");
             return Err(GCError::Configuration("Object ID cannot be empty".to_string()));
         }
         
         if request.service_id.is_empty() {
+            self.metrics.record_startup_error("lease_validation", "empty_service_id");
             return Err(GCError::Configuration("Service ID cannot be empty".to_string()));
         }
         
@@ -215,6 +319,7 @@ impl GCService {
         if duration < self.config.gc.min_lease_duration_seconds
             || duration > self.config.gc.max_lease_duration_seconds
         {
+            self.metrics.record_startup_error("lease_validation", "invalid_duration");
             return Err(GCError::InvalidLeaseDuration {
                 duration,
                 min: self.config.gc.min_lease_duration_seconds,
@@ -225,6 +330,7 @@ impl GCService {
         Ok(())
     }
     
+    /// Check if a service has exceeded its lease limit
     async fn check_service_lease_limit(&self, service_id: &str) -> Result<()> {
         let filter = LeaseFilter {
             service_id: Some(service_id.to_string()),
@@ -261,6 +367,7 @@ impl GCService {
 
 #[tonic::async_trait]
 impl DistributedGcService for GCService {
+    /// Create a new lease for an object with enhanced metrics
     async fn create_lease(
         &self,
         request: Request<CreateLeaseRequest>,
@@ -355,6 +462,7 @@ impl DistributedGcService for GCService {
         }
     }
     
+    /// Renew an existing lease to extend its lifetime
     async fn renew_lease(
         &self,
         request: Request<RenewLeaseRequest>,
@@ -462,6 +570,7 @@ impl DistributedGcService for GCService {
         }
     }
     
+    /// Release a lease immediately, triggering cleanup
     async fn release_lease(
         &self,
         request: Request<ReleaseLeaseRequest>,
@@ -549,6 +658,7 @@ impl DistributedGcService for GCService {
         }
     }
     
+    /// Get information about a specific lease
     async fn get_lease(
         &self,
         request: Request<GetLeaseRequest>,
@@ -592,6 +702,7 @@ impl DistributedGcService for GCService {
         }
     }
     
+    /// List leases with optional filtering
     async fn list_leases(
         &self,
         request: Request<ListLeasesRequest>,
@@ -670,6 +781,7 @@ impl DistributedGcService for GCService {
         }
     }
     
+    /// Check the health status of the GarbageTruck service with startup metrics
     async fn health_check(
         &self,
         _request: Request<HealthCheckRequest>,
@@ -723,6 +835,7 @@ impl DistributedGcService for GCService {
         }
     }
     
+    /// Get comprehensive metrics about the GarbageTruck service including startup metrics
     async fn get_metrics(
         &self,
         _request: Request<MetricsRequest>,

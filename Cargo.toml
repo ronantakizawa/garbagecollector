@@ -1,13 +1,19 @@
 [package]
-name = "distributed-gc-sidecar"
+name = "garbagetruck"  # Keep this - it's the crate name
 version = "0.1.0"
 edition = "2021"
+description = "A lease-based garbage collection sidecar for distributed systems"
+license = "MIT"
+repository = "https://github.com/your-org/garbagecollector"  # Update to match your repo
+keywords = ["grpc", "gc", "sidecar", "microservices", "lease"]
+categories = ["network-programming", "development-tools"]
 
-# Add lib section to make the crate available for integration tests
+# Add lib section to make the crate available
 [lib]
-name = "distributed_gc_sidecar"
+name = "garbagetruck"
 path = "src/lib.rs"
 
+# Keep all your existing dependencies exactly as they are
 [dependencies]
 # gRPC and protobuf
 tonic = { version = "0.12", features = ["transport"] }
@@ -54,6 +60,9 @@ tower = { version = "0.4", features = ["util"] }
 anyhow = "1.0"
 thiserror = "1.0"
 
+# Client-specific dependencies
+fastrand = "2.0"
+
 [dev-dependencies]
 # Testing framework
 tokio-test = "0.4"
@@ -81,12 +90,13 @@ tonic-build = "0.12"
 
 [features]
 # Enable postgres by default, make it optional for builds without database
-default = []
+default = ["grpc"]
 grpc = []
 postgres = ["sqlx/postgres", "sqlx/runtime-tokio-native-tls"]
+client = []
 
 [[bin]]
-name = "gc-sidecar"
+name = "garbagetruck"
 path = "src/main.rs"
 
 # Integration tests
@@ -98,3 +108,9 @@ path = "tests/integration.rs"
 [[bench]]
 name = "gc_benchmarks"
 harness = false
+
+# Examples
+[[example]]
+name = "client_usage"
+path = "examples/client_usage.rs"
+required-features = ["client"]
