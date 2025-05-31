@@ -26,6 +26,7 @@ pub use config::Config;
 pub use error::{GCError, Result};
 pub use lease::{Lease, ObjectType, LeaseState, CleanupConfig};
 pub use service::{GCService, GCServiceHandlers};
+pub use storage::{Storage, create_storage};
 pub use shutdown::{ShutdownCoordinator, ShutdownConfig, TaskHandle, TaskType, TaskPriority, ShutdownReason};
 
 // Re-export new modules

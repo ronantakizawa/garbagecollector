@@ -385,6 +385,36 @@ export GC_CLEANUP_MAX_RETRIES=3
 export GC_CLEANUP_RETRY_DELAY=5
 ```
 
+## 📂 Source File Overview
+
+- **src/bin/main.rs** – Application entry point and minimal startup coordination  
+- **src/lib.rs** – Crate root with module declarations and public API re-exports  
+- **src/startup.rs** – Application startup orchestration and component initialization  
+- **src/dependencies.rs** – External dependency checking and health validation  
+- **src/monitoring.rs** – System monitoring tasks and performance tracking  
+- **src/config.rs** – Configuration loading, validation, and environment variable parsing  
+- **src/error.rs** – Error types and `Result` definitions for the entire crate  
+- **src/lease.rs** – Core lease data structures and business logic  
+- **src/cleanup.rs** – Cleanup executor for expired lease processing  
+- **src/client.rs** – gRPC client SDK and convenience methods for service interaction  
+- **src/shutdown.rs** – Graceful shutdown coordination and task management  
+
+### 📦 Service Module (`src/service/`)
+- **mod.rs** – Core service struct, business logic, and cleanup loop management  
+- **handlers.rs** – gRPC method implementations and request/response handling  
+- **validation.rs** – Request validation logic and input sanitization  
+
+### 💾 Storage Module (`src/storage/`)
+- **mod.rs** – Storage trait definitions, factory function, and shared types  
+- **memory.rs** – In-memory storage implementation using DashMap for development/testing  
+- **postgres.rs** – PostgreSQL storage implementation with connection pooling for production  
+
+### 📊 Metrics Module (`src/metrics/`)
+- **mod.rs** – Core Prometheus metrics definitions and main `Metrics` struct  
+- **alerting.rs** – Alert management system with thresholds and notification logic  
+- **interceptors.rs** – gRPC interceptors for automatic request/response metrics collection  
+- **monitoring.rs** – Background monitoring tasks and extended metric implementations 
+
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
