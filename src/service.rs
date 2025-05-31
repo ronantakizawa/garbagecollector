@@ -1,5 +1,3 @@
-// src/service.rs - Enhanced with graceful shutdown support
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tonic::{Request, Response, Status};
@@ -788,14 +786,14 @@ impl DistributedGcService for GCService {
                 } else { 
                     crate::proto::ObjectType::try_from(req.object_type)
                         .ok()
-                        .map(|pt| ObjectType::from(pt))
+                        .map(ObjectType::from)
                 },
                 state: if req.state == 0 { 
                     None 
                 } else { 
                     crate::proto::LeaseState::try_from(req.state)
                         .ok()
-                        .map(|ps| LeaseState::from(ps))
+                        .map(LeaseState::from)
                 },
                 ..Default::default()
             };

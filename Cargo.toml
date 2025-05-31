@@ -95,9 +95,10 @@ grpc = []
 postgres = ["sqlx/postgres", "sqlx/runtime-tokio-native-tls"]
 client = []
 
+# UPDATED: Binary now points to bin/main.rs
 [[bin]]
 name = "garbagetruck"
-path = "src/main.rs"
+path = "src/bin/main.rs"
 
 
 [[test]]
