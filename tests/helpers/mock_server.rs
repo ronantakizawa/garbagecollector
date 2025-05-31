@@ -79,7 +79,7 @@ impl MockCleanupServer {
     pub async fn start(&self) -> tokio::task::JoinHandle<()> {
         let server = self.clone();
         let port = self.port;
-        
+
         tokio::spawn(async move {
             start_mock_cleanup_server(server, port).await;
         })
@@ -106,7 +106,5 @@ async fn start_mock_cleanup_server(server: MockCleanupServer, port: u16) {
             }
         });
 
-    warp::serve(cleanup_route)
-        .run(([127, 0, 0, 1], port))
-        .await;
+    warp::serve(cleanup_route).run(([127, 0, 0, 1], port)).await;
 }

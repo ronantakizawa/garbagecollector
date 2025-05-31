@@ -1,4 +1,4 @@
-// src/storage/mod.rs - Storage trait and factory
+// src/storage/mod.rs - Storage module with proper exports and syntax
 
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -7,123 +7,77 @@ use crate::config::Config;
 use crate::error::{GCError, Result};
 use crate::lease::{Lease, LeaseFilter, LeaseStats};
 
-// Re-export submodules
+// Import storage implementations
 pub mod memory;
+
+#[cfg(feature = "postgres")]
 pub mod postgres;
 
-// Re-export implementations
+// Re-export the implementations
 pub use memory::MemoryStorage;
+
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresStorage;
 
-/// Storage trait defining the interface for lease persistence
+/// Core storage trait that all storage backends must implement
 #[async_trait]
 pub trait Storage: Send + Sync {
-    /// Create a new lease in storage
     async fn create_lease(&self, lease: Lease) -> Result<()>;
-    
-    /// Retrieve a lease by ID
     async fn get_lease(&self, lease_id: &str) -> Result<Option<Lease>>;
-    
-    /// Update an existing lease
     async fn update_lease(&self, lease: Lease) -> Result<()>;
-    
-    /// Delete a lease by ID
     async fn delete_lease(&self, lease_id: &str) -> Result<()>;
-    
-    /// List leases with optional filtering, limit, and offset
-    async fn list_leases(&self, filter: LeaseFilter, limit: Option<usize>, offset: Option<usize>) -> Result<Vec<Lease>>;
-    
-    /// Count leases matching the given filter
+    async fn list_leases(
+        &self,
+        filter: LeaseFilter,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<Vec<Lease>>;
     async fn count_leases(&self, filter: LeaseFilter) -> Result<usize>;
-    
-    /// Get expired leases that are ready for cleanup (past grace period)
     async fn get_expired_leases(&self, grace_period: std::time::Duration) -> Result<Vec<Lease>>;
-    
-    /// Get storage statistics and metrics
     async fn get_stats(&self) -> Result<LeaseStats>;
-    
-    /// Perform storage cleanup operations (remove old expired leases, etc.)
     async fn cleanup(&self) -> Result<()>;
 }
 
-/// Factory function to create storage implementations based on configuration
-pub async fn create_storage(config: &Config) -> Result<Arc<dyn Storage + Send + Sync>> {
-    match config.storage.backend.as_str() {
-        "memory" => {
-            tracing::info!("Creating memory storage backend");
-            Ok(Arc::new(MemoryStorage::new()))
-        }
-        #[cfg(feature = "postgres")]
-        "postgres" => {
-            let database_url = config.storage.database_url
-                .as_ref()
-                .ok_or_else(|| GCError::Configuration("Database URL required for postgres backend".to_string()))?;
-            let max_connections = config.storage.max_connections.unwrap_or(10);
-            
-            tracing::info!("Creating PostgreSQL storage backend with {} max connections", max_connections);
-            let storage = PostgresStorage::new(database_url, max_connections).await?;
-            Ok(Arc::new(storage))
-        }
-        #[cfg(not(feature = "postgres"))]
-        "postgres" => {
-            Err(GCError::Configuration("Postgres support not compiled in. Enable 'postgres' feature.".to_string()))
-        }
-        backend => {
-            Err(GCError::Configuration(format!("Unknown storage backend: {}", backend)))
-        }
-    }
+/// Extended storage trait for additional features (optional)
+#[async_trait]
+pub trait ExtendedStorage: Storage {
+    async fn get_info(&self) -> Result<StorageInfo>;
+    async fn migrate(&self) -> Result<()>;
+    async fn create_indexes(&self) -> Result<()>;
+    async fn get_detailed_stats(&self) -> Result<DetailedStorageStats>;
 }
 
-/// Storage backend capabilities and metadata
+/// Storage backend information
 #[derive(Debug, Clone)]
 pub struct StorageInfo {
     pub backend_type: String,
+    pub version: String,
     pub supports_transactions: bool,
     pub supports_indexes: bool,
-    pub estimated_capacity: Option<usize>,
-    pub connection_pool_size: Option<usize>,
+    pub estimated_size_bytes: Option<u64>,
 }
 
 impl StorageInfo {
-    /// Get storage info for memory backend
     pub fn memory() -> Self {
         Self {
             backend_type: "memory".to_string(),
+            version: "1.0".to_string(),
             supports_transactions: false,
             supports_indexes: false,
-            estimated_capacity: Some(1_000_000), // Rough estimate
-            connection_pool_size: None,
+            estimated_size_bytes: None,
         }
     }
-    
-    /// Get storage info for PostgreSQL backend
+
     #[cfg(feature = "postgres")]
-    pub fn postgres(pool_size: u32) -> Self {
+    pub fn postgres(version: String) -> Self {
         Self {
             backend_type: "postgres".to_string(),
+            version,
             supports_transactions: true,
             supports_indexes: true,
-            estimated_capacity: None, // Depends on database configuration
-            connection_pool_size: Some(pool_size as usize),
+            estimated_size_bytes: None,
         }
     }
-}
-
-/// Extended storage trait for implementations that support additional features
-#[async_trait]
-pub trait ExtendedStorage: Storage {
-    /// Get storage backend information
-    async fn get_info(&self) -> Result<StorageInfo>;
-    
-    /// Perform database migrations (for SQL backends)
-    async fn migrate(&self) -> Result<()>;
-    
-    /// Create database indexes for better performance
-    async fn create_indexes(&self) -> Result<()>;
-    
-    /// Get detailed storage metrics
-    async fn get_detailed_stats(&self) -> Result<DetailedStorageStats>;
 }
 
 /// Detailed storage statistics
@@ -135,17 +89,14 @@ pub struct DetailedStorageStats {
     pub query_performance: Option<QueryPerformanceStats>,
 }
 
-/// Connection pool statistics
 #[derive(Debug, Clone)]
 pub struct ConnectionPoolStats {
-    pub active_connections: usize,
-    pub idle_connections: usize,
-    pub max_connections: usize,
-    pub total_acquired: u64,
-    pub total_creation_time_ms: u64,
+    pub total_connections: u32,
+    pub active_connections: u32,
+    pub idle_connections: u32,
+    pub max_connections: u32,
 }
 
-/// Query performance statistics
 #[derive(Debug, Clone)]
 pub struct QueryPerformanceStats {
     pub average_query_time_ms: f64,
@@ -154,50 +105,135 @@ pub struct QueryPerformanceStats {
     pub failed_queries: u64,
 }
 
+/// Factory function to create storage backends based on configuration
+pub async fn create_storage(config: &Config) -> Result<Arc<dyn Storage + Send + Sync>> {
+    match config.storage.backend.as_str() {
+        "memory" => {
+            let storage = MemoryStorage::new();
+            Ok(Arc::new(storage))
+        }
+        #[cfg(feature = "postgres")]
+        "postgres" => {
+            let database_url = config.storage.database_url.as_ref().ok_or_else(|| {
+                GCError::Configuration("Database URL required for postgres backend".to_string())
+            })?;
+            let max_connections = config.storage.max_connections.unwrap_or(10);
+
+            let storage = PostgresStorage::new(database_url, max_connections)
+                .await
+                .map_err(|e| {
+                    GCError::Configuration(format!("Failed to create PostgreSQL storage: {}", e))
+                })?;
+            Ok(Arc::new(storage))
+        }
+        #[cfg(not(feature = "postgres"))]
+        "postgres" => Err(GCError::Configuration(
+            "Postgres support not compiled in. Enable 'postgres' feature.".to_string(),
+        )),
+        backend => Err(GCError::Configuration(format!(
+            "Unknown storage backend: {}",
+            backend
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
-    
+
     #[tokio::test]
     async fn test_create_memory_storage() {
         let mut config = Config::default();
         config.storage.backend = "memory".to_string();
-        
-        let storage = create_storage(&config).await.unwrap();
-        
-        // Verify we can use the storage
-        let stats = storage.get_stats().await.unwrap();
-        assert_eq!(stats.total_leases, 0);
+
+        let result = create_storage(&config).await;
+        assert!(result.is_ok(), "Should create memory storage successfully");
+
+        let storage = result.unwrap();
+
+        // Test basic functionality
+        let lease = Lease::new(
+            "test".to_string(),
+            crate::lease::ObjectType::DatabaseRow,
+            "service".to_string(),
+            std::time::Duration::from_secs(300),
+            std::collections::HashMap::new(),
+            None,
+        );
+        let lease_id = lease.lease_id.clone();
+
+        storage.create_lease(lease).await.unwrap();
+        let retrieved = storage.get_lease(&lease_id).await.unwrap();
+        assert!(retrieved.is_some(), "Should retrieve created lease");
     }
-    
-    #[test]
-    fn test_unknown_storage_backend() {
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let mut config = Config::default();
-            config.storage.backend = "unknown".to_string();
-            
-            let result = create_storage(&config).await;
-            assert!(result.is_err());
-            match result {
-                Err(e) => {
-                    assert!(e.to_string().contains("Unknown storage backend"), 
-                            "Error should mention unknown backend: {}", e);
-                }
-                Ok(_) => panic!("Expected error for unknown storage backend"),
+
+    #[tokio::test]
+    async fn test_unknown_storage_backend() {
+        let mut config = Config::default();
+        config.storage.backend = "unknown-backend".to_string();
+
+        let result = create_storage(&config).await;
+        assert!(result.is_err(), "Should fail for unknown backend");
+
+        match result {
+            Err(e) => {
+                assert!(
+                    e.to_string().contains("Unknown storage backend"),
+                    "Error should mention unknown backend: {}",
+                    e
+                );
             }
-        });
+            Ok(_) => panic!("Expected error for unknown backend"),
+        }
     }
-    
+
     #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn test_postgres_without_url() {
         let mut config = Config::default();
         config.storage.backend = "postgres".to_string();
-        config.storage.database_url = None;
-        
+        config.storage.database_url = None; // Missing URL
+
         let result = create_storage(&config).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Database URL required"));
+        assert!(
+            result.is_err(),
+            "Should fail when postgres backend selected but no URL provided"
+        );
+
+        match result {
+            Err(e) => {
+                let error_msg = e.to_string();
+                assert!(
+                    error_msg.contains("Database URL required"),
+                    "Error should mention missing URL: {}",
+                    error_msg
+                );
+            }
+            Ok(_) => panic!("Expected error for missing postgres URL"),
+        }
+    }
+
+    #[cfg(not(feature = "postgres"))]
+    #[tokio::test]
+    async fn test_postgres_feature_disabled() {
+        let mut config = Config::default();
+        config.storage.backend = "postgres".to_string();
+
+        let result = create_storage(&config).await;
+        assert!(
+            result.is_err(),
+            "Should fail when postgres feature is disabled"
+        );
+
+        match result {
+            Err(e) => {
+                assert!(
+                    e.to_string().contains("Postgres support not compiled in"),
+                    "Error should mention missing feature: {}",
+                    e
+                );
+            }
+            Ok(_) => panic!("Expected error for disabled postgres feature"),
+        }
     }
 }

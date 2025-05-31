@@ -1,7 +1,7 @@
 // src/metrics/alerting.rs - Alerting system for metrics
 
 use std::time::{Duration, Instant};
-use tracing::{error, info, warn};
+use tracing::{error, warn};
 
 /// Alerting system for tracking and managing alerts
 #[derive(Debug, Clone)]
@@ -106,13 +106,13 @@ impl AlertingSystem {
             consecutive_failures: std::collections::HashMap::new(),
         }
     }
-    
+
     /// Create alerting system with custom thresholds
     pub fn with_thresholds(mut self, thresholds: AlertThresholds) -> Self {
         self.thresholds = thresholds;
         self
     }
-    
+
     /// Check if an alert should be triggered (respects cooldown)
     pub fn should_alert(&self, alert_type: &AlertType) -> bool {
         if let Some(last_alert_time) = self.last_alert_times.get(alert_type) {
@@ -122,15 +122,15 @@ impl AlertingSystem {
             true
         }
     }
-    
+
     /// Trigger a new alert
     pub fn trigger_alert(&mut self, alert: Alert) {
         let alert_type = alert.alert_type.clone();
-        
+
         if !self.should_alert(&alert_type) {
             return; // Still in cooldown period
         }
-        
+
         // Log the alert
         match alert.severity {
             AlertSeverity::Warning => {
@@ -158,26 +158,26 @@ impl AlertingSystem {
                 );
             }
         }
-        
+
         // Update last alert time
         self.last_alert_times.insert(alert_type, Instant::now());
-        
+
         // Store alert
         let alert_event = AlertEvent {
             alert: alert.clone(),
             triggered_at: Instant::now(),
             resolved_at: None,
         };
-        
+
         self.alerts.push(alert);
         self.alert_history.push(alert_event);
-        
+
         // Keep only recent alerts in memory (last 100)
         if self.alert_history.len() > 100 {
             self.alert_history.drain(..50);
         }
     }
-    
+
     /// Get currently active alerts
     pub fn get_active_alerts(&self) -> Vec<Alert> {
         // Return alerts from the last hour that haven't been resolved
@@ -188,43 +188,58 @@ impl AlertingSystem {
             .cloned()
             .collect()
     }
-    
+
     /// Increment consecutive failure counter
     pub fn increment_consecutive_failures(&mut self, failure_type: &str) {
-        let count = self.consecutive_failures
+        let count = self
+            .consecutive_failures
             .entry(failure_type.to_string())
             .or_insert(0);
         *count += 1;
     }
-    
+
     /// Reset consecutive failure counter
     pub fn reset_consecutive_failures(&mut self, failure_type: &str) {
-        self.consecutive_failures.insert(failure_type.to_string(), 0);
+        self.consecutive_failures
+            .insert(failure_type.to_string(), 0);
     }
-    
+
     /// Get consecutive failure count
     pub fn get_consecutive_failures(&self, failure_type: &str) -> u64 {
-        self.consecutive_failures.get(failure_type).copied().unwrap_or(0)
+        self.consecutive_failures
+            .get(failure_type)
+            .copied()
+            .unwrap_or(0)
     }
-    
+
     /// Get alert summary for health checks
     pub fn get_summary(&self) -> AlertSummary {
         let active_alerts = self.get_active_alerts();
-        
+
         AlertSummary {
             total_active_alerts: active_alerts.len(),
-            critical_alerts: active_alerts.iter().filter(|a| matches!(a.severity, AlertSeverity::Critical)).count(),
-            warning_alerts: active_alerts.iter().filter(|a| matches!(a.severity, AlertSeverity::Warning)).count(),
-            fatal_alerts: active_alerts.iter().filter(|a| matches!(a.severity, AlertSeverity::Fatal)).count(),
+            critical_alerts: active_alerts
+                .iter()
+                .filter(|a| matches!(a.severity, AlertSeverity::Critical))
+                .count(),
+            warning_alerts: active_alerts
+                .iter()
+                .filter(|a| matches!(a.severity, AlertSeverity::Warning))
+                .count(),
+            fatal_alerts: active_alerts
+                .iter()
+                .filter(|a| matches!(a.severity, AlertSeverity::Fatal))
+                .count(),
             recent_alerts: active_alerts,
         }
     }
-    
+
     /// Clear old alerts to prevent memory growth
     pub fn cleanup_old_alerts(&mut self) {
         let cutoff_time = Instant::now() - Duration::from_secs(24 * 3600); // 24 hours
         self.alerts.retain(|alert| alert.created_at > cutoff_time);
-        self.alert_history.retain(|event| event.triggered_at > cutoff_time);
+        self.alert_history
+            .retain(|event| event.triggered_at > cutoff_time);
     }
 }
 

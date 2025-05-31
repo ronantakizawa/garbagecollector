@@ -7,19 +7,20 @@ use tonic::transport::Channel;
 use uuid::Uuid;
 
 use garbagetruck::proto::{
-    distributed_gc_service_client::DistributedGcServiceClient,
-    CreateLeaseRequest, ObjectType, CleanupConfig,
+    distributed_gc_service_client::DistributedGcServiceClient, CleanupConfig, CreateLeaseRequest,
+    ObjectType,
 };
 
 use crate::helpers::mock_server::MockCleanupServer;
 
 // Test modules
-pub mod storage;
 pub mod grpc;
 pub mod service;
+pub mod storage;
 
-#[cfg(feature = "postgres")]
-pub mod database;
+// Remove this line since we don't have database tests yet:
+// #[cfg(feature = "postgres")]
+// pub mod database;
 
 pub mod cross_backend;
 
@@ -37,7 +38,7 @@ impl TestHarness {
         let cleanup_server = MockCleanupServer::new();
         let cleanup_server_clone = cleanup_server.clone();
         let port = cleanup_server.get_port();
-        
+
         let cleanup_server_handle = cleanup_server_clone.start().await;
 
         // Wait for cleanup server to start
@@ -54,7 +55,11 @@ impl TestHarness {
     }
 
     /// Create a test lease through the gRPC API
-    pub async fn create_test_lease(&mut self, object_id: &str, duration_seconds: u64) -> Result<String> {
+    pub async fn create_test_lease(
+        &mut self,
+        object_id: &str,
+        duration_seconds: u64,
+    ) -> Result<String> {
         let port = self.cleanup_server.get_port();
         let request = CreateLeaseRequest {
             object_id: object_id.to_string(),
@@ -73,7 +78,7 @@ impl TestHarness {
 
         let response = self.gc_client.create_lease(request).await?;
         let lease_response = response.into_inner();
-        
+
         if !lease_response.success {
             anyhow::bail!("Failed to create lease: {}", lease_response.error_message);
         }
@@ -108,7 +113,7 @@ impl TestHarness {
 
         let response = self.gc_client.create_lease(request).await?;
         let lease_response = response.into_inner();
-        
+
         if !lease_response.success {
             anyhow::bail!("Failed to create lease: {}", lease_response.error_message);
         }
@@ -158,12 +163,12 @@ async fn test_suite_summary() -> anyhow::Result<()> {
     println!("====================");
     println!("✅ Storage Layer Tests:");
     println!("   • Memory storage basic operations");
-    println!("   • Memory storage filtering and listing");  
+    println!("   • Memory storage filtering and listing");
     println!("   • Memory storage expired lease handling");
     println!("   • Memory storage statistics");
     println!("   • Storage factory pattern");
     println!("");
-    
+
     #[cfg(feature = "postgres")]
     {
         println!("✅ PostgreSQL Tests:");
@@ -177,7 +182,7 @@ async fn test_suite_summary() -> anyhow::Result<()> {
         println!("   • Constraints and validation");
         println!("");
     }
-    
+
     println!("✅ gRPC Service Tests:");
     println!("   • Health check");
     println!("   • Lease CRUD operations via gRPC");
@@ -186,7 +191,7 @@ async fn test_suite_summary() -> anyhow::Result<()> {
     println!("   • Automatic cleanup processes");
     println!("   • Metrics collection");
     println!("");
-    
+
     println!("✅ Service Integration Tests:");
     println!("   • Graceful shutdown coordination");
     println!("   • Task priority handling");
@@ -194,18 +199,18 @@ async fn test_suite_summary() -> anyhow::Result<()> {
     println!("   • Component restart scenarios");
     println!("   • Resource cleanup simulation");
     println!("");
-    
+
     println!("✅ Integration Tests:");
     println!("   • End-to-end lease lifecycle");
     println!("   • Cleanup server integration");
     println!("   • Error handling and edge cases");
     println!("   • Cross-backend consistency");
     println!("");
-    
+
     println!("🎯 To run all tests:");
     println!("   cargo test --features postgres  # Full test suite");
     println!("   cargo test                      # Memory-only tests");
     println!("   make test-integration           # Integration tests");
-    
+
     Ok(())
 }

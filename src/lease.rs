@@ -58,7 +58,7 @@ impl Lease {
     ) -> Self {
         let now = Utc::now();
         let expires_at = now + chrono::Duration::from_std(lease_duration).unwrap();
-        
+
         Self {
             lease_id: Uuid::new_v4().to_string(),
             object_id,
@@ -73,15 +73,15 @@ impl Lease {
             renewal_count: 0,
         }
     }
-    
+
     pub fn is_expired(&self) -> bool {
         Utc::now() > self.expires_at
     }
-    
+
     pub fn is_active(&self) -> bool {
         self.state == LeaseState::Active && !self.is_expired()
     }
-    
+
     pub fn time_until_expiry(&self) -> Option<chrono::Duration> {
         if self.is_expired() {
             None
@@ -89,43 +89,43 @@ impl Lease {
             Some(self.expires_at - Utc::now())
         }
     }
-    
+
     pub fn renew(&mut self, extend_duration: std::time::Duration) -> crate::error::Result<()> {
         if !self.is_active() {
             return Err(crate::error::GCError::LeaseExpired {
                 lease_id: self.lease_id.clone(),
             });
         }
-        
+
         let now = Utc::now();
         self.expires_at = now + chrono::Duration::from_std(extend_duration).unwrap();
         self.last_renewed_at = now;
         self.renewal_count += 1;
-        
+
         Ok(())
     }
-    
+
     pub fn release(&mut self) {
         self.state = LeaseState::Released;
     }
-    
+
     pub fn expire(&mut self) {
         self.state = LeaseState::Expired;
     }
-    
+
     pub fn should_cleanup(&self, grace_period: std::time::Duration) -> bool {
         if self.state != LeaseState::Expired {
             return false;
         }
-        
+
         let grace_expires_at = self.expires_at + chrono::Duration::from_std(grace_period).unwrap();
         Utc::now() > grace_expires_at
     }
-    
+
     pub fn age(&self) -> chrono::Duration {
         Utc::now() - self.created_at
     }
-    
+
     pub fn time_since_last_renewal(&self) -> chrono::Duration {
         Utc::now() - self.last_renewed_at
     }
@@ -207,14 +207,14 @@ impl From<CleanupConfig> for crate::proto::CleanupConfig {
 impl From<&Lease> for crate::proto::LeaseInfo {
     fn from(lease: &Lease) -> Self {
         use prost_types::Timestamp;
-        
+
         fn datetime_to_timestamp(dt: DateTime<Utc>) -> Option<Timestamp> {
             Some(Timestamp {
                 seconds: dt.timestamp(),
                 nanos: dt.timestamp_subsec_nanos() as i32,
             })
         }
-        
+
         Self {
             lease_id: lease.lease_id.clone(),
             object_id: lease.object_id.clone(),
@@ -258,7 +258,7 @@ impl Default for LeaseStats {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LeaseFilter {
     pub service_id: Option<String>,
     pub object_type: Option<ObjectType>,
@@ -269,20 +269,6 @@ pub struct LeaseFilter {
     pub expires_before: Option<DateTime<Utc>>,
 }
 
-impl Default for LeaseFilter {
-    fn default() -> Self {
-        Self {
-            service_id: None,
-            object_type: None,
-            state: None,
-            created_after: None,
-            created_before: None,
-            expires_after: None,
-            expires_before: None,
-        }
-    }
-}
-
 impl LeaseFilter {
     pub fn matches(&self, lease: &Lease) -> bool {
         if let Some(ref service_id) = self.service_id {
@@ -290,43 +276,43 @@ impl LeaseFilter {
                 return false;
             }
         }
-        
+
         if let Some(ref object_type) = self.object_type {
             if lease.object_type != *object_type {
                 return false;
             }
         }
-        
+
         if let Some(ref state) = self.state {
             if lease.state != *state {
                 return false;
             }
         }
-        
+
         if let Some(created_after) = self.created_after {
             if lease.created_at <= created_after {
                 return false;
             }
         }
-        
+
         if let Some(created_before) = self.created_before {
             if lease.created_at >= created_before {
                 return false;
             }
         }
-        
+
         if let Some(expires_after) = self.expires_after {
             if lease.expires_at <= expires_after {
                 return false;
             }
         }
-        
+
         if let Some(expires_before) = self.expires_before {
             if lease.expires_at >= expires_before {
                 return false;
             }
         }
-        
+
         true
     }
 }

@@ -1,8 +1,8 @@
 // tests/helpers/mod.rs - Common test utilities
 
+pub mod assertions;
 pub mod mock_server;
 pub mod test_data;
-pub mod assertions;
 
 use std::sync::atomic::{AtomicU16, Ordering};
 
@@ -17,18 +17,18 @@ pub fn get_next_port() -> u16 {
 /// Wait for a service to be ready
 pub async fn wait_for_service(addr: &str, timeout_ms: u64) -> bool {
     use tokio::time::{sleep, Duration};
-    
+
     let timeout = Duration::from_millis(timeout_ms);
     let check_interval = Duration::from_millis(50);
     let start = std::time::Instant::now();
-    
+
     while start.elapsed() < timeout {
         if tokio::net::TcpStream::connect(addr).await.is_ok() {
             return true;
         }
         sleep(check_interval).await;
     }
-    
+
     false
 }
 

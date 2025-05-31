@@ -3,7 +3,7 @@ use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
 use crate::error::{GCError, Result};
-use crate::lease::{Lease, CleanupConfig};
+use crate::lease::{CleanupConfig, Lease};
 
 #[derive(Debug, Clone)]
 pub struct CleanupExecutor {
@@ -152,7 +152,7 @@ impl CleanupExecutor {
                 .text()
                 .await
                 .unwrap_or_else(|_| "Failed to read response body".to_string());
-            
+
             Err(GCError::Cleanup(format!(
                 "gRPC cleanup failed with status {}: {}",
                 status, body
@@ -196,7 +196,7 @@ impl CleanupExecutor {
                 .text()
                 .await
                 .unwrap_or_else(|_| "Failed to read response body".to_string());
-            
+
             Err(GCError::Cleanup(format!(
                 "HTTP cleanup failed with status {}: {}",
                 status, body
@@ -212,12 +212,12 @@ impl CleanupExecutor {
         for lease in leases {
             let executor = self.clone();
             let semaphore = semaphore.clone();
-            
+
             let handle = tokio::spawn(async move {
                 let _permit = semaphore.acquire().await.unwrap();
                 let lease_id = lease.lease_id.clone();
                 let object_id = lease.object_id.clone();
-                
+
                 let result = executor.cleanup_lease(&lease).await;
                 CleanupResult {
                     lease_id,
@@ -226,7 +226,7 @@ impl CleanupExecutor {
                     error: result.err().map(|e| e.to_string()),
                 }
             });
-            
+
             handles.push(handle);
         }
 

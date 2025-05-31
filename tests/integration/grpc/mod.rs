@@ -1,12 +1,12 @@
 // tests/integration/grpc/mod.rs - gRPC test utilities
 
 // gRPC test modules
-pub mod basic;
 pub mod auth;
-pub mod concurrent;
+pub mod basic;
 pub mod cleanup;
+pub mod concurrent;
 
-use garbagetruck::proto::{ObjectType, CreateLeaseRequest, CleanupConfig};
+use garbagetruck::proto::{CleanupConfig, CreateLeaseRequest, ObjectType};
 use std::collections::HashMap;
 
 /// Create a standard gRPC create lease request

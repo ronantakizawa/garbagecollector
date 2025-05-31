@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, Mutex, watch};
+use tokio::sync::{broadcast, watch, Mutex};
 use tokio::time::timeout;
-use tracing::{error, info, warn, debug};
+use tracing::{debug, error, info, warn};
 
 /// Graceful shutdown coordinator that manages the lifecycle of background tasks
 #[derive(Debug, Clone)]
@@ -66,12 +66,12 @@ struct TaskRegistry {
 /// Information about a registered background task
 #[derive(Debug)]
 struct TaskInfo {
-    name: String,
-    task_type: TaskType,
+    _name: String,
+    _task_type: TaskType,
     handle: tokio::task::JoinHandle<()>,
     shutdown_tx: Option<watch::Sender<bool>>,
     status: TaskStatus,
-    registered_at: Instant,
+    _registered_at: Instant,
     priority: TaskPriority,
 }
 
@@ -142,7 +142,7 @@ impl ShutdownCoordinator {
     /// Create a new shutdown coordinator
     pub fn new(config: ShutdownConfig) -> Self {
         let (shutdown_tx, _) = broadcast::channel(16);
-        
+
         Self {
             shutdown_tx,
             task_registry: Arc::new(Mutex::new(TaskRegistry {
@@ -163,17 +163,17 @@ impl ShutdownCoordinator {
         priority: TaskPriority,
     ) -> TaskHandle {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        
+
         // Create a placeholder handle for now - will be updated when task starts
         let handle = tokio::spawn(async {});
-        
+
         let task_info = TaskInfo {
-            name: name.clone(),
-            task_type,
+            _name: name.clone(),
+            _task_type: task_type,
             handle,
             shutdown_tx: Some(shutdown_tx),
             status: TaskStatus::Running,
-            registered_at: Instant::now(),
+            _registered_at: Instant::now(),
             priority,
         };
 
@@ -202,18 +202,18 @@ impl ShutdownCoordinator {
     /// Start listening for shutdown signals (SIGTERM, SIGINT)
     pub async fn listen_for_signals(&self) {
         let coordinator = self.clone();
-        
+
         tokio::spawn(async move {
             #[cfg(unix)]
             {
                 use tokio::signal::unix::{signal, SignalKind};
-                
-                let mut sigterm = signal(SignalKind::terminate())
-                    .expect("Failed to register SIGTERM handler");
-                let mut sigint = signal(SignalKind::interrupt())
-                    .expect("Failed to register SIGINT handler");
-                let mut sigquit = signal(SignalKind::quit())
-                    .expect("Failed to register SIGQUIT handler");
+
+                let mut sigterm =
+                    signal(SignalKind::terminate()).expect("Failed to register SIGTERM handler");
+                let mut sigint =
+                    signal(SignalKind::interrupt()).expect("Failed to register SIGINT handler");
+                let mut sigquit =
+                    signal(SignalKind::quit()).expect("Failed to register SIGQUIT handler");
 
                 tokio::select! {
                     _ = sigterm.recv() => {
@@ -234,9 +234,13 @@ impl ShutdownCoordinator {
             #[cfg(not(unix))]
             {
                 // Windows support
-                tokio::signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+                tokio::signal::ctrl_c()
+                    .await
+                    .expect("Failed to listen for Ctrl+C");
                 info!("Received Ctrl+C, initiating graceful shutdown");
-                coordinator.initiate_shutdown(ShutdownReason::Graceful).await;
+                coordinator
+                    .initiate_shutdown(ShutdownReason::Graceful)
+                    .await;
             }
         });
     }
@@ -244,14 +248,14 @@ impl ShutdownCoordinator {
     /// Initiate shutdown process
     pub async fn initiate_shutdown(&self, reason: ShutdownReason) {
         let shutdown_start = Instant::now();
-        
+
         {
             let mut registry = self.task_registry.lock().await;
             if registry.shutdown_started {
                 warn!("Shutdown already in progress, ignoring duplicate signal");
                 return;
             }
-            
+
             registry.shutdown_started = true;
             registry.shutdown_reason = Some(reason.clone());
             registry.shutdown_start_time = Some(shutdown_start);
@@ -289,7 +293,7 @@ impl ShutdownCoordinator {
         let phase_start = Instant::now();
         self.signal_all_tasks_shutdown().await;
         phase_durations.insert("signal_tasks".to_string(), phase_start.elapsed());
-        
+
         tokio::time::sleep(self.config.phase_delay).await;
 
         // Phase 2: Wait for tasks to complete gracefully (ordered by priority)
@@ -312,7 +316,9 @@ impl ShutdownCoordinator {
         phase_durations.insert("final_cleanup".to_string(), phase_start.elapsed());
 
         let registry = self.task_registry.lock().await;
-        let reason = registry.shutdown_reason.clone()
+        let reason = registry
+            .shutdown_reason
+            .clone()
             .unwrap_or(ShutdownReason::Graceful);
 
         Ok(ShutdownStats {
@@ -329,7 +335,7 @@ impl ShutdownCoordinator {
     /// Send shutdown signal to all registered tasks
     async fn signal_all_tasks_shutdown(&self) {
         info!("📢 Signaling shutdown to all background tasks");
-        
+
         let mut registry = self.task_registry.lock().await;
         let mut signaled_count = 0;
 
@@ -354,8 +360,11 @@ impl ShutdownCoordinator {
 
     /// Wait for tasks to complete gracefully, respecting priority order
     async fn wait_for_graceful_completion(&self) -> (usize, usize) {
-        info!("⏳ Waiting for tasks to complete gracefully (timeout: {:?})", self.config.graceful_timeout);
-        
+        info!(
+            "⏳ Waiting for tasks to complete gracefully (timeout: {:?})",
+            self.config.graceful_timeout
+        );
+
         let start_time = Instant::now();
         let mut completed_count = 0;
         let mut failed_count = 0;
@@ -363,7 +372,9 @@ impl ShutdownCoordinator {
         // Get tasks sorted by priority (highest first)
         let task_names_by_priority = {
             let registry = self.task_registry.lock().await;
-            let mut tasks: Vec<_> = registry.tasks.iter()
+            let mut tasks: Vec<_> = registry
+                .tasks
+                .iter()
                 .map(|(name, info)| (name.clone(), info.priority.clone()))
                 .collect();
             tasks.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by priority descending
@@ -371,12 +382,20 @@ impl ShutdownCoordinator {
         };
 
         // Wait for each priority group
-        for priority in [TaskPriority::Critical, TaskPriority::High, TaskPriority::Normal, TaskPriority::Low] {
-            let priority_tasks: Vec<_> = task_names_by_priority.iter()
+        for priority in [
+            TaskPriority::Critical,
+            TaskPriority::High,
+            TaskPriority::Normal,
+            TaskPriority::Low,
+        ] {
+            let priority_tasks: Vec<_> = task_names_by_priority
+                .iter()
                 .filter(|name| {
                     let registry_guard = self.task_registry.try_lock();
                     if let Ok(registry) = registry_guard {
-                        registry.tasks.get(*name)
+                        registry
+                            .tasks
+                            .get(*name)
                             .map(|info| info.priority == priority)
                             .unwrap_or(false)
                     } else {
@@ -390,14 +409,21 @@ impl ShutdownCoordinator {
                 continue;
             }
 
-            info!("Waiting for {:?} priority tasks: {:?}", priority, priority_tasks);
+            info!(
+                "Waiting for {:?} priority tasks: {:?}",
+                priority, priority_tasks
+            );
 
             for task_name in priority_tasks {
-                let remaining_time = self.config.graceful_timeout
+                let remaining_time = self
+                    .config
+                    .graceful_timeout
                     .saturating_sub(start_time.elapsed());
 
                 if remaining_time.is_zero() {
-                    warn!("Graceful shutdown timeout reached, remaining tasks will be force-killed");
+                    warn!(
+                        "Graceful shutdown timeout reached, remaining tasks will be force-killed"
+                    );
                     break;
                 }
 
@@ -427,7 +453,8 @@ impl ShutdownCoordinator {
                                     break;
                                 }
                             }
-                        }).await
+                        })
+                        .await
                     } else {
                         continue;
                     }
@@ -454,16 +481,18 @@ impl ShutdownCoordinator {
             tokio::time::sleep(self.config.phase_delay).await;
         }
 
-        info!("Graceful completion phase finished: {} completed, {} failed/timeout", 
-               completed_count, failed_count);
-        
+        info!(
+            "Graceful completion phase finished: {} completed, {} failed/timeout",
+            completed_count, failed_count
+        );
+
         (completed_count, failed_count)
     }
 
     /// Force kill remaining tasks that didn't shutdown gracefully
     async fn force_kill_remaining_tasks(&self) -> usize {
         info!("🔨 Force killing remaining tasks");
-        
+
         let mut registry = self.task_registry.lock().await;
         let mut killed_count = 0;
 
@@ -491,21 +520,27 @@ impl ShutdownCoordinator {
     /// Perform final cleanup operations
     async fn final_cleanup(&self) {
         info!("🧹 Performing final cleanup");
-        
+
         // Give a moment for any final operations
         tokio::time::sleep(Duration::from_millis(100)).await;
-        
+
         let registry = self.task_registry.lock().await;
         let total_tasks = registry.tasks.len();
-        let completed_tasks = registry.tasks.values()
+        let completed_tasks = registry
+            .tasks
+            .values()
             .filter(|t| matches!(t.status, TaskStatus::Completed))
             .count();
-        let failed_tasks = registry.tasks.values()
+        let failed_tasks = registry
+            .tasks
+            .values()
             .filter(|t| matches!(t.status, TaskStatus::Failed(_)))
             .count();
 
-        info!("📊 Final task status: {}/{} completed, {} failed", 
-               completed_tasks, total_tasks, failed_tasks);
+        info!(
+            "📊 Final task status: {}/{} completed, {} failed",
+            completed_tasks, total_tasks, failed_tasks
+        );
 
         // Log any tasks that had issues
         for (name, task_info) in registry.tasks.iter() {
@@ -524,15 +559,23 @@ impl ShutdownCoordinator {
     /// Get shutdown statistics (if shutdown has been initiated)
     pub async fn get_shutdown_stats(&self) -> Option<ShutdownStats> {
         let registry = self.task_registry.lock().await;
-        
-        if let (Some(reason), Some(start_time)) = (&registry.shutdown_reason, registry.shutdown_start_time) {
-            let completed_tasks = registry.tasks.values()
+
+        if let (Some(reason), Some(start_time)) =
+            (&registry.shutdown_reason, registry.shutdown_start_time)
+        {
+            let completed_tasks = registry
+                .tasks
+                .values()
                 .filter(|t| matches!(t.status, TaskStatus::Completed))
                 .count();
-            let failed_tasks = registry.tasks.values()
+            let failed_tasks = registry
+                .tasks
+                .values()
                 .filter(|t| matches!(t.status, TaskStatus::Failed(_)))
                 .count();
-            let forced_kills = registry.tasks.values()
+            let forced_kills = registry
+                .tasks
+                .values()
                 .filter(|t| {
                     if let TaskStatus::Failed(ref reason) = t.status {
                         reason.contains("Force killed")
@@ -621,19 +664,21 @@ mod tests {
     async fn test_shutdown_coordinator_creation() {
         let config = ShutdownConfig::default();
         let coordinator = ShutdownCoordinator::new(config);
-        
+
         assert!(!coordinator.is_shutdown_initiated().await);
     }
 
     #[tokio::test]
     async fn test_task_registration() {
         let coordinator = ShutdownCoordinator::new(ShutdownConfig::default());
-        
-        let _handle = coordinator.register_task(
-            "test-task".to_string(),
-            TaskType::Custom("test".to_string()),
-            TaskPriority::Normal,
-        ).await;
+
+        let _handle = coordinator
+            .register_task(
+                "test-task".to_string(),
+                TaskType::Custom("test".to_string()),
+                TaskPriority::Normal,
+            )
+            .await;
 
         // Verify task was registered
         let registry = coordinator.task_registry.lock().await;
@@ -647,13 +692,15 @@ mod tests {
             ..Default::default()
         };
         let coordinator = ShutdownCoordinator::new(config);
-        
+
         // Register a test task
-        let handle = coordinator.register_task(
-            "test-task".to_string(),
-            TaskType::Custom("test".to_string()),
-            TaskPriority::Normal,
-        ).await;
+        let handle = coordinator
+            .register_task(
+                "test-task".to_string(),
+                TaskType::Custom("test".to_string()),
+                TaskPriority::Normal,
+            )
+            .await;
 
         // Spawn a task that responds to shutdown
         let task_handle = tokio::spawn({
@@ -666,10 +713,14 @@ mod tests {
             }
         });
 
-        coordinator.update_task_handle("test-task", task_handle).await;
+        coordinator
+            .update_task_handle("test-task", task_handle)
+            .await;
 
         // Initiate shutdown
-        coordinator.initiate_shutdown(ShutdownReason::Graceful).await;
+        coordinator
+            .initiate_shutdown(ShutdownReason::Graceful)
+            .await;
 
         // Verify shutdown was initiated
         assert!(coordinator.is_shutdown_initiated().await);
@@ -690,13 +741,15 @@ mod tests {
             ..Default::default()
         };
         let coordinator = ShutdownCoordinator::new(config);
-        
+
         // Register a task that won't respond to shutdown
-        let handle = coordinator.register_task(
-            "stubborn-task".to_string(),
-            TaskType::Custom("test".to_string()),
-            TaskPriority::Normal,
-        ).await;
+        let _handle = coordinator
+            .register_task(
+                "stubborn-task".to_string(),
+                TaskType::Custom("test".to_string()),
+                TaskPriority::Normal,
+            )
+            .await;
 
         // Spawn a task that ignores shutdown signals
         let task_handle = tokio::spawn(async {
@@ -706,10 +759,14 @@ mod tests {
             }
         });
 
-        coordinator.update_task_handle("stubborn-task", task_handle).await;
+        coordinator
+            .update_task_handle("stubborn-task", task_handle)
+            .await;
 
         // Initiate shutdown
-        coordinator.initiate_shutdown(ShutdownReason::Graceful).await;
+        coordinator
+            .initiate_shutdown(ShutdownReason::Graceful)
+            .await;
 
         // Check that task was force-killed
         if let Some(stats) = coordinator.get_shutdown_stats().await {
@@ -721,30 +778,36 @@ mod tests {
     #[tokio::test]
     async fn test_priority_shutdown_order() {
         let coordinator = ShutdownCoordinator::new(ShutdownConfig::default());
-        
+
         // Register tasks with different priorities
-        let _critical = coordinator.register_task(
-            "critical-task".to_string(),
-            TaskType::Custom("critical".to_string()),
-            TaskPriority::Critical,
-        ).await;
+        let _critical = coordinator
+            .register_task(
+                "critical-task".to_string(),
+                TaskType::Custom("critical".to_string()),
+                TaskPriority::Critical,
+            )
+            .await;
 
-        let _normal = coordinator.register_task(
-            "normal-task".to_string(),
-            TaskType::Custom("normal".to_string()),
-            TaskPriority::Normal,
-        ).await;
+        let _normal = coordinator
+            .register_task(
+                "normal-task".to_string(),
+                TaskType::Custom("normal".to_string()),
+                TaskPriority::Normal,
+            )
+            .await;
 
-        let _low = coordinator.register_task(
-            "low-task".to_string(),
-            TaskType::Custom("low".to_string()),
-            TaskPriority::Low,
-        ).await;
+        let _low = coordinator
+            .register_task(
+                "low-task".to_string(),
+                TaskType::Custom("low".to_string()),
+                TaskPriority::Low,
+            )
+            .await;
 
         // Verify tasks were registered with correct priorities
         let registry = coordinator.task_registry.lock().await;
         assert_eq!(registry.tasks.len(), 3);
-        
+
         assert_eq!(
             registry.tasks.get("critical-task").unwrap().priority,
             TaskPriority::Critical

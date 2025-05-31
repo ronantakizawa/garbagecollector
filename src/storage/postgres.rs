@@ -3,7 +3,7 @@
 #[cfg(feature = "postgres")]
 use async_trait::async_trait;
 #[cfg(feature = "postgres")]
-use sqlx::{PgPool, Row, postgres::PgConnectOptions, query};
+use sqlx::{postgres::PgConnectOptions, PgPool, Row};
 #[cfg(feature = "postgres")]
 use std::str::FromStr;
 #[cfg(feature = "postgres")]
@@ -12,10 +12,13 @@ use tracing::{debug, info, warn};
 #[cfg(feature = "postgres")]
 use crate::error::{GCError, Result};
 #[cfg(feature = "postgres")]
-use crate::lease::{Lease, LeaseFilter, LeaseStats, LeaseState, ObjectType};
+use crate::lease::{Lease, LeaseFilter, LeaseState, LeaseStats, ObjectType};
 
 #[cfg(feature = "postgres")]
-use super::{Storage, ExtendedStorage, StorageInfo, DetailedStorageStats, ConnectionPoolStats, QueryPerformanceStats};
+use super::{
+    ConnectionPoolStats, DetailedStorageStats, ExtendedStorage, QueryPerformanceStats, Storage,
+    StorageInfo,
+};
 
 /// PostgreSQL storage implementation
 #[cfg(feature = "postgres")]
@@ -29,12 +32,15 @@ pub struct PostgresStorage {
 impl PostgresStorage {
     /// Create a new PostgreSQL storage instance
     pub async fn new(database_url: &str, max_connections: u32) -> Result<Self> {
-        info!("Connecting to PostgreSQL database with {} max connections", max_connections);
-        
+        info!(
+            "Connecting to PostgreSQL database with {} max connections",
+            max_connections
+        );
+
         let options = PgConnectOptions::from_str(database_url)
             .map_err(|e| GCError::Database(e.to_string()))?
             .application_name("garbage-truck");
-            
+
         let pool = sqlx::pool::PoolOptions::new()
             .max_connections(max_connections)
             .connect_with(options)
@@ -49,14 +55,17 @@ impl PostgresStorage {
             .map_err(|e| GCError::Database(format!("Migration failed: {}", e)))?;
 
         info!("PostgreSQL storage initialized successfully");
-        Ok(Self { pool, max_connections })
+        Ok(Self {
+            pool,
+            max_connections,
+        })
     }
-    
+
     /// Get the connection pool
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
-    
+
     /// Convert ObjectType enum to integer for database storage
     fn object_type_to_int(obj_type: &ObjectType) -> i32 {
         match obj_type {
@@ -104,50 +113,57 @@ impl PostgresStorage {
     /// Convert database row to Lease struct
     fn lease_from_row(row: &sqlx::postgres::PgRow) -> Result<Lease> {
         use sqlx::Row;
-        
+
         let object_type = Self::int_to_object_type(
             row.try_get("object_type")
-                .map_err(|e| GCError::Database(e.to_string()))?
+                .map_err(|e| GCError::Database(e.to_string()))?,
         );
 
         let state = Self::int_to_lease_state(
             row.try_get("state")
-                .map_err(|e| GCError::Database(e.to_string()))?
+                .map_err(|e| GCError::Database(e.to_string()))?,
         );
 
-        let metadata_json: serde_json::Value = row.try_get("metadata")
+        let metadata_json: serde_json::Value = row
+            .try_get("metadata")
             .map_err(|e| GCError::Database(e.to_string()))?;
-        let metadata: std::collections::HashMap<String, String> = 
-            serde_json::from_value(metadata_json)
-                .unwrap_or_default();
+        let metadata: std::collections::HashMap<String, String> =
+            serde_json::from_value(metadata_json).unwrap_or_default();
 
-        let cleanup_config_json: Option<serde_json::Value> = row.try_get("cleanup_config")
+        let cleanup_config_json: Option<serde_json::Value> = row
+            .try_get("cleanup_config")
             .map_err(|e| GCError::Database(e.to_string()))?;
-        let cleanup_config = cleanup_config_json
-            .and_then(|v| serde_json::from_value(v).ok());
+        let cleanup_config = cleanup_config_json.and_then(|v| serde_json::from_value(v).ok());
 
         Ok(Lease {
-            lease_id: row.try_get("lease_id")
+            lease_id: row
+                .try_get("lease_id")
                 .map_err(|e| GCError::Database(e.to_string()))?,
-            object_id: row.try_get("object_id")
+            object_id: row
+                .try_get("object_id")
                 .map_err(|e| GCError::Database(e.to_string()))?,
             object_type,
-            service_id: row.try_get("service_id")
+            service_id: row
+                .try_get("service_id")
                 .map_err(|e| GCError::Database(e.to_string()))?,
             state,
-            created_at: row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+            created_at: row
+                .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
                 .map_err(|e| GCError::Database(e.to_string()))?,
-            expires_at: row.try_get::<chrono::DateTime<chrono::Utc>, _>("expires_at")
+            expires_at: row
+                .try_get::<chrono::DateTime<chrono::Utc>, _>("expires_at")
                 .map_err(|e| GCError::Database(e.to_string()))?,
-            last_renewed_at: row.try_get::<chrono::DateTime<chrono::Utc>, _>("last_renewed_at")
+            last_renewed_at: row
+                .try_get::<chrono::DateTime<chrono::Utc>, _>("last_renewed_at")
                 .map_err(|e| GCError::Database(e.to_string()))?,
             metadata,
             cleanup_config,
-            renewal_count: row.try_get::<i32, _>("renewal_count")
+            renewal_count: row
+                .try_get::<i32, _>("renewal_count")
                 .map_err(|e| GCError::Database(e.to_string()))? as u32,
         })
     }
-    
+
     /// Build WHERE clause for filtering queries
     fn build_where_clause(filter: &LeaseFilter, param_offset: i32) -> (String, Vec<String>) {
         let mut conditions = Vec::new();
@@ -210,13 +226,14 @@ impl PostgresStorage {
 #[async_trait]
 impl Storage for PostgresStorage {
     async fn create_lease(&self, lease: Lease) -> Result<()> {
-        let metadata_json = serde_json::to_value(&lease.metadata)
-            .map_err(|e| GCError::Serialization(e))?;
-        let cleanup_config_json = lease.cleanup_config
+        let metadata_json =
+            serde_json::to_value(&lease.metadata).map_err(GCError::Serialization)?;
+        let cleanup_config_json = lease
+            .cleanup_config
             .as_ref()
-            .map(|c| serde_json::to_value(c))
+            .map(serde_json::to_value)
             .transpose()
-            .map_err(|e| GCError::Serialization(e))?;
+            .map_err(GCError::Serialization)?;
 
         sqlx::query(
             r#"
@@ -225,16 +242,16 @@ impl Storage for PostgresStorage {
                 created_at, expires_at, last_renewed_at, metadata,
                 cleanup_config, renewal_count
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-            "#
+            "#,
         )
         .bind(&lease.lease_id)
         .bind(&lease.object_id)
         .bind(Self::object_type_to_int(&lease.object_type))
         .bind(&lease.service_id)
         .bind(Self::lease_state_to_int(&lease.state))
-        .bind(&lease.created_at)
-        .bind(&lease.expires_at)
-        .bind(&lease.last_renewed_at)
+        .bind(lease.created_at)
+        .bind(lease.expires_at)
+        .bind(lease.last_renewed_at)
         .bind(&metadata_json)
         .bind(&cleanup_config_json)
         .bind(lease.renewal_count as i32)
@@ -260,13 +277,14 @@ impl Storage for PostgresStorage {
     }
 
     async fn update_lease(&self, lease: Lease) -> Result<()> {
-        let metadata_json = serde_json::to_value(&lease.metadata)
-            .map_err(|e| GCError::Serialization(e))?;
-        let cleanup_config_json = lease.cleanup_config
+        let metadata_json =
+            serde_json::to_value(&lease.metadata).map_err(GCError::Serialization)?;
+        let cleanup_config_json = lease
+            .cleanup_config
             .as_ref()
-            .map(|c| serde_json::to_value(c))
+            .map(serde_json::to_value)
             .transpose()
-            .map_err(|e| GCError::Serialization(e))?;
+            .map_err(GCError::Serialization)?;
 
         let result = sqlx::query(
             r#"
@@ -275,15 +293,15 @@ impl Storage for PostgresStorage {
                 expires_at = $6, last_renewed_at = $7, metadata = $8,
                 cleanup_config = $9, renewal_count = $10
             WHERE lease_id = $1
-            "#
+            "#,
         )
         .bind(&lease.lease_id)
         .bind(&lease.object_id)
         .bind(Self::object_type_to_int(&lease.object_type))
         .bind(&lease.service_id)
         .bind(Self::lease_state_to_int(&lease.state))
-        .bind(&lease.expires_at)
-        .bind(&lease.last_renewed_at)
+        .bind(lease.expires_at)
+        .bind(lease.last_renewed_at)
         .bind(&metadata_json)
         .bind(&cleanup_config_json)
         .bind(lease.renewal_count as i32)
@@ -292,7 +310,9 @@ impl Storage for PostgresStorage {
         .map_err(|e| GCError::Database(e.to_string()))?;
 
         if result.rows_affected() == 0 {
-            return Err(GCError::LeaseNotFound { lease_id: lease.lease_id });
+            return Err(GCError::LeaseNotFound {
+                lease_id: lease.lease_id,
+            });
         }
 
         debug!("Updated lease {} in PostgreSQL storage", lease.lease_id);
@@ -307,36 +327,46 @@ impl Storage for PostgresStorage {
             .map_err(|e| GCError::Database(e.to_string()))?;
 
         if result.rows_affected() == 0 {
-            return Err(GCError::LeaseNotFound { lease_id: lease_id.to_string() });
+            return Err(GCError::LeaseNotFound {
+                lease_id: lease_id.to_string(),
+            });
         }
 
         debug!("Deleted lease {} from PostgreSQL storage", lease_id);
         Ok(())
     }
 
-    async fn list_leases(&self, filter: LeaseFilter, limit: Option<usize>, offset: Option<usize>) -> Result<Vec<Lease>> {
+    async fn list_leases(
+        &self,
+        filter: LeaseFilter,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<Vec<Lease>> {
         let (where_clause, params) = Self::build_where_clause(&filter, 0);
-        
-        let mut query_str = format!("SELECT * FROM leases{} ORDER BY created_at DESC", where_clause);
-        
+
+        let mut query_str = format!(
+            "SELECT * FROM leases{} ORDER BY created_at DESC",
+            where_clause
+        );
+
         let mut param_count = params.len() as i32;
-        if let Some(limit) = limit {
+        if let Some(_limit) = limit {
             param_count += 1;
             query_str.push_str(&format!(" LIMIT ${}", param_count));
         }
 
-        if let Some(offset) = offset {
+        if let Some(_offset) = offset {
             param_count += 1;
             query_str.push_str(&format!(" OFFSET ${}", param_count));
         }
 
         let mut query = sqlx::query(&query_str);
-        
+
         // Bind filter parameters
         for param in params {
             query = query.bind(param);
         }
-        
+
         // Bind limit and offset
         if let Some(limit) = limit {
             query = query.bind(limit as i64);
@@ -373,7 +403,8 @@ impl Storage for PostgresStorage {
             .await
             .map_err(|e| GCError::Database(e.to_string()))?;
 
-        let count: i64 = row.try_get("count")
+        let count: i64 = row
+            .try_get("count")
             .map_err(|e| GCError::Database(e.to_string()))?;
 
         Ok(count as usize)
@@ -381,7 +412,7 @@ impl Storage for PostgresStorage {
 
     async fn get_expired_leases(&self, grace_period: std::time::Duration) -> Result<Vec<Lease>> {
         let grace_interval = format!("{} seconds", grace_period.as_secs());
-        
+
         let rows = sqlx::query(&format!(
             "SELECT * FROM leases WHERE state = 0 AND expires_at < NOW() - INTERVAL '{}' ORDER BY expires_at ASC",
             grace_interval
@@ -395,7 +426,10 @@ impl Storage for PostgresStorage {
             leases.push(Self::lease_from_row(&row)?);
         }
 
-        debug!("Found {} expired leases in PostgreSQL storage", leases.len());
+        debug!(
+            "Found {} expired leases in PostgreSQL storage",
+            leases.len()
+        );
         Ok(leases)
     }
 
@@ -405,36 +439,56 @@ impl Storage for PostgresStorage {
             .fetch_optional(&self.pool)
             .await;
 
-        let (total_leases, active_leases, expired_leases, released_leases, avg_duration, avg_renewals) = 
-            if let Ok(Some(stats_row)) = stats_result {
-                (
-                    stats_row.try_get::<i64, _>("total_leases").unwrap_or(0),
-                    stats_row.try_get::<i64, _>("active_leases").unwrap_or(0),
-                    stats_row.try_get::<i64, _>("expired_leases").unwrap_or(0),
-                    stats_row.try_get::<i64, _>("released_leases").unwrap_or(0),
-                    stats_row.try_get::<Option<f64>, _>("avg_lease_duration_hours").unwrap_or(None),
-                    stats_row.try_get::<Option<f64>, _>("avg_renewal_count").unwrap_or(None),
-                )
-            } else {
-                // Fallback to individual queries
-                warn!("Stored procedure get_lease_statistics() not available, using fallback queries");
-                let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+        let (
+            total_leases,
+            active_leases,
+            expired_leases,
+            released_leases,
+            avg_duration,
+            avg_renewals,
+        ) = if let Ok(Some(stats_row)) = stats_result {
+            (
+                stats_row.try_get::<i64, _>("total_leases").unwrap_or(0),
+                stats_row.try_get::<i64, _>("active_leases").unwrap_or(0),
+                stats_row.try_get::<i64, _>("expired_leases").unwrap_or(0),
+                stats_row.try_get::<i64, _>("released_leases").unwrap_or(0),
+                stats_row
+                    .try_get::<Option<f64>, _>("avg_lease_duration_hours")
+                    .unwrap_or(None),
+                stats_row
+                    .try_get::<Option<f64>, _>("avg_renewal_count")
+                    .unwrap_or(None),
+            )
+        } else {
+            // Fallback to individual queries
+            warn!("Stored procedure get_lease_statistics() not available, using fallback queries");
+            let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+                .fetch_one(&self.pool)
+                .await
+                .unwrap_or(0);
+            let active: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM leases WHERE state = 0 AND expires_at > NOW()",
+            )
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0);
+            let expired: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases WHERE state = 1 OR (state = 0 AND expires_at <= NOW())")
                     .fetch_one(&self.pool).await.unwrap_or(0);
-                let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases WHERE state = 0 AND expires_at > NOW()")
-                    .fetch_one(&self.pool).await.unwrap_or(0);
-                let expired: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases WHERE state = 1 OR (state = 0 AND expires_at <= NOW())")
-                    .fetch_one(&self.pool).await.unwrap_or(0);
-                let released: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases WHERE state = 2")
-                    .fetch_one(&self.pool).await.unwrap_or(0);
-                    
-                (total, active, expired, released, None, None)
-            };
+            let released: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM leases WHERE state = 2")
+                .fetch_one(&self.pool)
+                .await
+                .unwrap_or(0);
+
+            (total, active, expired, released, None, None)
+        };
 
         // Get service stats
-        let service_rows = sqlx::query("SELECT service_id, COUNT(*) as count FROM leases WHERE state = 0 GROUP BY service_id")
-            .fetch_all(&self.pool)
-            .await
-            .unwrap_or_default();
+        let service_rows = sqlx::query(
+            "SELECT service_id, COUNT(*) as count FROM leases WHERE state = 0 GROUP BY service_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
 
         let mut leases_by_service = std::collections::HashMap::new();
         for row in service_rows {
@@ -464,8 +518,7 @@ impl Storage for PostgresStorage {
             released_leases: released_leases as usize,
             leases_by_service,
             leases_by_type,
-            average_lease_duration: avg_duration
-                .map(|h| chrono::Duration::hours(h as i64)),
+            average_lease_duration: avg_duration.map(|h| chrono::Duration::hours(h as i64)),
             average_renewal_count: avg_renewals.unwrap_or(0.0),
         })
     }
@@ -473,7 +526,7 @@ impl Storage for PostgresStorage {
     async fn cleanup(&self) -> Result<()> {
         // Delete expired leases that have been in expired state for more than grace period
         let result = sqlx::query(
-            "DELETE FROM leases WHERE state = 1 AND expires_at < NOW() - INTERVAL '5 minutes'"
+            "DELETE FROM leases WHERE state = 1 AND expires_at < NOW() - INTERVAL '5 minutes'",
         )
         .execute(&self.pool)
         .await
@@ -484,7 +537,10 @@ impl Storage for PostgresStorage {
             .fetch_optional(&self.pool)
             .await;
 
-        debug!("Cleaned up {} expired lease records from PostgreSQL", result.rows_affected());
+        debug!(
+            "Cleaned up {} expired lease records from PostgreSQL",
+            result.rows_affected()
+        );
         Ok(())
     }
 }
@@ -493,7 +549,10 @@ impl Storage for PostgresStorage {
 #[async_trait]
 impl ExtendedStorage for PostgresStorage {
     async fn get_info(&self) -> Result<StorageInfo> {
-        Ok(StorageInfo::postgres(self.max_connections))
+        Ok(StorageInfo::postgres(format!(
+            "PostgreSQL with {} max connections",
+            self.max_connections
+        )))
     }
 
     async fn migrate(&self) -> Result<()> {
@@ -507,7 +566,7 @@ impl ExtendedStorage for PostgresStorage {
 
     async fn create_indexes(&self) -> Result<()> {
         info!("Creating PostgreSQL indexes for performance");
-        
+
         // Create indexes if they don't exist
         let index_queries = vec![
             "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_leases_service_id ON leases(service_id)",
@@ -550,13 +609,13 @@ impl ExtendedStorage for PostgresStorage {
             .map(|size| size as u64);
 
         // Get connection pool stats
-        let pool_stats = ConnectionPoolStats {
-            active_connections: self.pool.size() as usize,
-            idle_connections: self.pool.num_idle() as usize,
-            max_connections: self.max_connections as usize,
-            total_acquired: 0, // Not easily available from sqlx
-            total_creation_time_ms: 0, // Not easily available from sqlx
-        };
+        let pool_stats = Some(ConnectionPoolStats {
+            total_connections: self.pool.size(),
+            active_connections: (self.pool.size() as usize).saturating_sub(self.pool.num_idle())
+                as u32,
+            idle_connections: self.pool.num_idle() as u32,
+            max_connections: self.max_connections,
+        });
 
         // Get query performance stats (simplified)
         let query_stats = QueryPerformanceStats {
@@ -569,7 +628,7 @@ impl ExtendedStorage for PostgresStorage {
         Ok(DetailedStorageStats {
             total_storage_size_bytes: total_size,
             index_size_bytes: index_size,
-            connection_pool_stats: Some(pool_stats),
+            connection_pool_stats: pool_stats,
             query_performance: Some(query_stats),
         })
     }
@@ -582,6 +641,8 @@ pub struct PostgresStorage;
 #[cfg(not(feature = "postgres"))]
 impl PostgresStorage {
     pub async fn new(_database_url: &str, _max_connections: u32) -> crate::error::Result<Self> {
-        Err(crate::error::GCError::Configuration("PostgreSQL support not compiled in. Enable 'postgres' feature.".to_string()))
+        Err(crate::error::GCError::Configuration(
+            "PostgreSQL support not compiled in. Enable 'postgres' feature.".to_string(),
+        ))
     }
 }

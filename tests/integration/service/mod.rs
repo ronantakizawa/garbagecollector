@@ -1,11 +1,11 @@
 // tests/integration/service/mod.rs - Service-level integration tests
 
-pub mod shutdown;
 pub mod lifecycle;
+pub mod shutdown;
 
-use std::time::Duration;
+use garbagetruck::shutdown::{ShutdownConfig, ShutdownCoordinator};
 use garbagetruck::{Config, GCService};
-use garbagetruck::shutdown::{ShutdownCoordinator, ShutdownConfig, TaskType, TaskPriority};
+use std::time::Duration;
 
 /// Create a test GC service with minimal configuration
 pub async fn create_test_service() -> anyhow::Result<GCService> {
@@ -13,8 +13,9 @@ pub async fn create_test_service() -> anyhow::Result<GCService> {
     config.gc.cleanup_interval_seconds = 1; // Very short for testing
     config.gc.cleanup_grace_period_seconds = 1;
     config.storage.backend = "memory".to_string(); // Use memory storage for tests
-    
-    GCService::new(config).await
+
+    GCService::new(config)
+        .await
         .map_err(|e| anyhow::anyhow!("Service creation failed: {}", e))
 }
 
@@ -26,7 +27,7 @@ pub fn create_test_shutdown_coordinator() -> ShutdownCoordinator {
         force_kill_on_timeout: true,
         metrics_collection_timeout: Duration::from_secs(1),
     };
-    
+
     ShutdownCoordinator::new(config)
 }
 
