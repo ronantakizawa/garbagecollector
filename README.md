@@ -40,7 +40,7 @@ User uploads a file → Service receives a 1-hour lease → Service crashes → 
 
 ## 🏗️ Architecture
 
-<img width="821" alt="Screenshot 2025-05-31 at 10 35 16 PM" src="https://github.com/user-attachments/assets/87cb55b8-e050-40b2-ab90-b05c63f24722" />
+<img width="982" alt="Screenshot 2025-05-31 at 10 50 31 PM" src="https://github.com/user-attachments/assets/e1bd40ec-904c-4afe-9e16-1cd2a84e544a" />
 <img width="871" alt="Screenshot 2025-05-31 at 10 35 23 PM" src="https://github.com/user-attachments/assets/f2909eea-6660-4b4f-8c24-4224c1c0c8a6" />
 
 
