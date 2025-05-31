@@ -120,7 +120,7 @@ jobs:
           DATABASE_URL: postgres://testuser:testpass@localhost:5432/testdb
 
       - name: Run comprehensive test summary
-        run: cargo test integration::test_suite_summary --all-features --ignored
+        run: cargo test integration::test_suite_summary --all-features
         env:
           DATABASE_URL: postgres://testuser:testpass@localhost:5432/testdb
 
