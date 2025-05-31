@@ -6,53 +6,173 @@ on:
   pull_request:
     branches: [ main ]
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
+          components: clippy, rustfmt
 
       - name: Install Protobuf compiler
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      - name: Build (check it compiles)
-        run: cargo build --release
+      - name: Cache cargo dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      # Set up Docker Compose
-      - name: Set up Docker Compose environment
-        run: docker compose up -d postgres prometheus garbagetruck
-
-      - name: Wait for Postgres to be healthy
+      # Set up database environment
+      - name: Set up database environment
         run: |
-          for i in {1..30}; do
-            docker compose exec postgres pg_isready -U testuser -d testdb && break
-            sleep 2
-          done
+          export DATABASE_URL=postgres://testuser:testpass@localhost:5432/testdb
+          echo "DATABASE_URL=postgres://testuser:testpass@localhost:5432/testdb" >> $GITHUB_ENV
 
-      - name: Run tests
-        run: cargo test --all
-
-      # Optionally run more integration/comprehensive tests
-      - name: Run integration.rs
-        run: cargo test --test integration || true
-
-      - name: Run comprehensive shell tests
+      - name: Apply database migrations
         run: |
-          if [ -f ./scripts/comprehensive_test.sh ]; then
-            bash ./scripts/comprehensive_test.sh
+          # Install sqlx-cli if needed for migrations
+          cargo install sqlx-cli --no-default-features --features postgres || true
+          
+          # Apply migrations (if you have a migrations directory)
+          if [ -d "migrations" ]; then
+            sqlx migrate run --database-url $DATABASE_URL
           fi
 
-      - name: Tear down docker compose
-        run: docker compose down -v
+      # Build and test phases
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
-      - name: Collect docker logs
-        if: failure()
-        run: docker compose logs
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build (check compilation)
+        run: cargo build --all-features
+
+      # Test phases - run different test categories
+      - name: Run unit tests
+        run: cargo test --lib --all-features
+
+      - name: Run storage tests (memory only)
+        run: cargo test integration::storage::memory --all-features
+
+      - name: Run storage tests (with postgres)
+        run: cargo test integration::storage --all-features
+        env:
+          DATABASE_URL: postgres://testuser:testpass@localhost:5432/testdb
+
+      - name: Run service lifecycle tests
+        run: cargo test integration::service --all-features
+
+      # Start GarbageTruck service for gRPC integration tests
+      - name: Start GarbageTruck service in background
+        run: |
+          # Start the service in the background
+          cargo run --bin garbagetruck --all-features &
+          GARBAGETRUCK_PID=$!
+          echo "GARBAGETRUCK_PID=$GARBAGETRUCK_PID" >> $GITHUB_ENV
+          
+          # Wait for service to be ready
+          for i in {1..30}; do
+            if curl -s http://localhost:50051 >/dev/null 2>&1 || nc -z localhost 50051; then
+              echo "GarbageTruck service is ready"
+              break
+            fi
+            echo "Waiting for GarbageTruck service to start..."
+            sleep 2
+          done
+        env:
+          DATABASE_URL: postgres://testuser:testpass@localhost:5432/testdb
+          RUST_LOG: info
+
+      - name: Run gRPC integration tests
+        run: cargo test integration::grpc --all-features
+        env:
+          DATABASE_URL: postgres://testuser:testpass@localhost:5432/testdb
+
+      - name: Run cross-backend consistency tests
+        run: cargo test integration::cross_backend --all-features
+        env:
+          DATABASE_URL: postgres://testuser:testpass@localhost:5432/testdb
+
+      - name: Run comprehensive test summary
+        run: cargo test integration::test_suite_summary --all-features --ignored
+        env:
+          DATABASE_URL: postgres://testuser:testpass@localhost:5432/testdb
+
+      # Cleanup
+      - name: Stop GarbageTruck service
+        if: always()
+        run: |
+          if [ ! -z "$GARBAGETRUCK_PID" ]; then
+            kill $GARBAGETRUCK_PID || true
+          fi
+
+      # Optional: Run performance/stress tests
+      - name: Run stress tests (optional)
+        run: cargo test integration::grpc::concurrent --all-features --release
+        continue-on-error: true
+        env:
+          DATABASE_URL: postgres://testuser:testpass@localhost:5432/testdb
+
+  # Optional: separate job for database-specific tests
+  database-tests:
+    runs-on: ubuntu-latest
+    if: false  # Disable for now, enable if you add database-specific tests
+    
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Run database-specific tests
+        run: cargo test integration::database --all-features
+        env:
+          DATABASE_URL: postgres://testuser:testpass@localhost:5432/testdb

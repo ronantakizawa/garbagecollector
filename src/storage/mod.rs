@@ -179,7 +179,13 @@ mod tests {
             
             let result = create_storage(&config).await;
             assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("Unknown storage backend"));
+            match result {
+                Err(e) => {
+                    assert!(e.to_string().contains("Unknown storage backend"), 
+                            "Error should mention unknown backend: {}", e);
+                }
+                Ok(_) => panic!("Expected error for unknown storage backend"),
+            }
         });
     }
     

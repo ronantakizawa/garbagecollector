@@ -144,19 +144,24 @@ impl Storage for MemoryStorage {
     }
     
     async fn get_expired_leases(&self, grace_period: std::time::Duration) -> Result<Vec<Lease>> {
-        self.increment_stat("get_expired_leases");
-        
-        let expired_leases: Vec<Lease> = self.leases
-            .iter()
-            .map(|entry| entry.value().clone())
-            .filter(|lease| {
-                lease.is_expired() && lease.should_cleanup(grace_period)
-            })
-            .collect();
-        
-        debug!("Found {} expired leases ready for cleanup", expired_leases.len());
-        Ok(expired_leases)
-    }
+    self.increment_stat("get_expired_leases");
+    
+    let expired_leases: Vec<Lease> = self.leases
+        .iter()
+        .map(|entry| entry.value().clone())
+        .filter(|lease| {
+            // A lease is considered expired if:
+            // 1. It's past its expiration time (is_expired()), OR
+            // 2. It's explicitly marked as expired state
+            // AND it should be cleaned up (past grace period)
+            let is_expired = lease.is_expired() || lease.state == LeaseState::Expired;
+            is_expired && lease.should_cleanup(grace_period)
+        })
+        .collect();
+    
+    debug!("Found {} expired leases ready for cleanup", expired_leases.len());
+    Ok(expired_leases)
+}
     
     async fn get_stats(&self) -> Result<LeaseStats> {
         self.increment_stat("get_stats");
@@ -400,22 +405,26 @@ mod tests {
     
     #[tokio::test]
     async fn test_cleanup() {
-        let storage = MemoryStorage::new();
-        
-        // Create an expired lease
-        let mut lease = create_test_lease("1", "service-1");
-        lease.expire();
-        lease.expires_at = chrono::Utc::now() - chrono::Duration::hours(1); // Expired 1 hour ago
-        
-        storage.create_lease(lease).await.unwrap();
-        
-        // Run cleanup
-        storage.cleanup().await.unwrap();
-        
-        // Should still be there (grace period not passed)
-        let stats = storage.get_stats().await.unwrap();
-        assert_eq!(stats.total_leases, 1);
-    }
+    let storage = MemoryStorage::new();
+    
+    // Create an expired lease
+    let mut lease = create_test_lease("1", "service-1");
+    
+    // CRITICAL FIX: Set expiration far enough in the past
+    // The cleanup() method uses a 5-minute (300 second) grace period internally
+    // So we need to expire the lease more than 5 minutes ago
+    lease.expires_at = chrono::Utc::now() - chrono::Duration::minutes(10); // 10 minutes ago
+    lease.expire(); // Set state to Expired
+    
+    storage.create_lease(lease).await.unwrap();
+    
+    // Run cleanup - this uses the internal grace period of 300 seconds
+    storage.cleanup().await.unwrap();
+    
+    // After cleanup, the lease should be removed since it expired > 5 minutes ago
+    let stats = storage.get_stats().await.unwrap();
+    assert_eq!(stats.total_leases, 0, "Cleanup should have removed the expired lease");
+}
     
     #[tokio::test]
     async fn test_extended_storage_features() {

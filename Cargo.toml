@@ -101,11 +101,6 @@ client = []
 name = "garbagetruck"
 path = "src/bin/main.rs"
 
-
-[[test]]
-name = "integration"
-path = "tests/integration.rs"
-
 [[bench]]
 name = "benchmark"
 harness = false

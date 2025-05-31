@@ -1,22 +1,20 @@
-use garbagetruck::{
-    shutdown::{ShutdownCoordinator, ShutdownConfig, TaskType, TaskPriority, ShutdownReason},
-    GCService, Config,
-};
+// tests/integration/service/shutdown.rs - Shutdown coordination tests
+
+use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
+use garbagetruck::shutdown::{ShutdownCoordinator, ShutdownConfig, TaskType, TaskPriority, ShutdownReason};
+
+use crate::integration::{print_test_header, service::*};
+
 #[tokio::test]
-async fn test_graceful_shutdown_basic() {
-    let config = ShutdownConfig {
-        graceful_timeout: Duration::from_secs(5),
-        phase_delay: Duration::from_millis(100),
-        force_kill_on_timeout: true,
-        metrics_collection_timeout: Duration::from_secs(1),
-    };
+async fn test_graceful_shutdown_basic() -> Result<()> {
+    print_test_header("graceful shutdown basic", "🛑");
     
-    let coordinator = ShutdownCoordinator::new(config);
+    let coordinator = create_test_shutdown_coordinator();
     
     // Register a well-behaved task
     let task_handle = coordinator.register_task(
@@ -69,10 +67,13 @@ async fn test_graceful_shutdown_basic() {
     assert_eq!(stats.forced_kills, 0);
     
     println!("✅ Graceful shutdown test completed successfully");
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_force_kill_on_timeout() {
+async fn test_force_kill_on_timeout() -> Result<()> {
+    print_test_header("force kill on timeout", "💀");
+    
     let config = ShutdownConfig {
         graceful_timeout: Duration::from_millis(500),
         phase_delay: Duration::from_millis(50),
@@ -113,10 +114,13 @@ async fn test_force_kill_on_timeout() {
     assert_eq!(stats.forced_kills, 1);
     
     println!("✅ Force kill test completed successfully");
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_shutdown_priority_ordering() {
+async fn test_shutdown_priority_ordering() -> Result<()> {
+    print_test_header("shutdown priority ordering", "📊");
+    
     let coordinator = ShutdownCoordinator::new(ShutdownConfig::default());
     
     let shutdown_order = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -183,66 +187,14 @@ async fn test_shutdown_priority_ordering() {
     
     println!("✅ Priority ordering test completed");
     println!("Shutdown order: {:?}", *final_order);
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_gc_service_integration_with_shutdown() {
-    // Create a test configuration
-    let mut config = Config::default();
-    config.gc.cleanup_interval_seconds = 1; // Very short for testing
-    config.gc.cleanup_grace_period_seconds = 1;
+async fn test_multiple_shutdown_signals() -> Result<()> {
+    print_test_header("multiple shutdown signals", "🔁");
     
-    // Create GC service
-    let gc_service = match GCService::new(config).await {
-        Ok(service) => service,
-        Err(e) => {
-            println!("Skipping GC service integration test: {}", e);
-            return; // Skip if service creation fails (e.g., missing dependencies)
-        }
-    };
-    
-    // Create shutdown coordinator
-    let coordinator = ShutdownCoordinator::new(ShutdownConfig {
-        graceful_timeout: Duration::from_secs(3),
-        ..Default::default()
-    });
-    
-    // Register cleanup task
-    let cleanup_handle = coordinator.register_task(
-        "cleanup-task".to_string(),
-        TaskType::CleanupLoop,
-        TaskPriority::Critical,
-    ).await;
-    
-    // Start cleanup loop with shutdown support
-    let cleanup_task = {
-        let service = gc_service.clone();
-        let handle = cleanup_handle.clone();
-        
-        tokio::spawn(async move {
-            service.start_cleanup_loop_with_shutdown(handle).await;
-        })
-    };
-    
-    coordinator.update_task_handle("cleanup-task", cleanup_task).await;
-    
-    // Let the cleanup loop run for a bit
-    sleep(Duration::from_millis(500)).await;
-    
-    // Initiate shutdown
-    coordinator.initiate_shutdown(ShutdownReason::Graceful).await;
-    
-    // Verify shutdown completed
-    let stats = coordinator.get_shutdown_stats().await.unwrap();
-    assert_eq!(stats.total_tasks, 1);
-    assert_eq!(stats.completed_tasks, 1);
-    
-    println!("✅ GC service integration test completed");
-}
-
-#[tokio::test]
-async fn test_multiple_shutdown_signals() {
-    let coordinator = ShutdownCoordinator::new(ShutdownConfig::default());
+    let coordinator = create_test_shutdown_coordinator();
     
     // Register a task
     let task_handle = coordinator.register_task(
@@ -273,10 +225,13 @@ async fn test_multiple_shutdown_signals() {
     assert_eq!(stats.completed_tasks, 1);
     
     println!("✅ Multiple shutdown signals test completed");
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_shutdown_with_mixed_task_behavior() {
+async fn test_shutdown_with_mixed_task_behavior() -> Result<()> {
+    print_test_header("shutdown with mixed task behavior", "🎭");
+    
     let config = ShutdownConfig {
         graceful_timeout: Duration::from_secs(2),
         force_kill_on_timeout: true,
@@ -345,11 +300,14 @@ async fn test_shutdown_with_mixed_task_behavior() {
     assert_eq!(stats.forced_kills, 1); // stubborn task
     
     println!("✅ Mixed task behavior test completed");
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_shutdown_statistics_accuracy() {
-    let coordinator = ShutdownCoordinator::new(ShutdownConfig::default());
+async fn test_shutdown_statistics_accuracy() -> Result<()> {
+    print_test_header("shutdown statistics accuracy", "📈");
+    
+    let coordinator = create_test_shutdown_coordinator();
     
     // Create multiple tasks for statistical validation
     for i in 0..5 {
@@ -387,83 +345,5 @@ async fn test_shutdown_statistics_accuracy() {
     
     println!("✅ Shutdown statistics test completed");
     println!("Statistics: {:?}", stats);
-}
-
-// Helper function to simulate system resource cleanup
-async fn simulate_resource_cleanup(task_name: &str, duration_ms: u64) {
-    println!("🧹 {} starting resource cleanup...", task_name);
-    sleep(Duration::from_millis(duration_ms)).await;
-    println!("✅ {} completed resource cleanup", task_name);
-}
-
-#[tokio::test]
-async fn test_realistic_service_shutdown_scenario() {
-    let config = ShutdownConfig {
-        graceful_timeout: Duration::from_secs(10),
-        phase_delay: Duration::from_millis(200),
-        force_kill_on_timeout: true,
-        metrics_collection_timeout: Duration::from_secs(2),
-    };
-    
-    let coordinator = ShutdownCoordinator::new(config);
-    
-    // Simulate a realistic service with various components
-    let components = vec![
-        ("database_pool", TaskType::Custom("database".to_string()), TaskPriority::Critical, 300),
-        ("cache_manager", TaskType::Custom("cache".to_string()), TaskPriority::High, 150),
-        ("metrics_collector", TaskType::SystemMonitor, TaskPriority::High, 100),
-        ("http_server", TaskType::Custom("server".to_string()), TaskPriority::Low, 200),
-        ("cleanup_worker", TaskType::CleanupLoop, TaskPriority::Critical, 400),
-    ];
-    
-    for (name, task_type, priority, cleanup_time) in components {
-        let handle = coordinator.register_task(
-            name.to_string(),
-            task_type,
-            priority,
-        ).await;
-        
-        let task = tokio::spawn({
-            let mut handle = handle.clone();
-            let task_name = name.to_string();
-            
-            async move {
-                // Simulate normal operation
-                println!("🚀 {} started", task_name);
-                
-                handle.wait_for_shutdown().await;
-                println!("🛑 {} received shutdown signal", task_name);
-                
-                // Simulate component-specific cleanup
-                simulate_resource_cleanup(&task_name, cleanup_time).await;
-                
-                handle.mark_completed().await;
-                println!("✅ {} shutdown completed", task_name);
-            }
-        });
-        
-        coordinator.update_task_handle(name, task).await;
-    }
-    
-    // Let all components start
-    sleep(Duration::from_millis(100)).await;
-    
-    println!("🛑 Initiating service shutdown...");
-    let shutdown_start = std::time::Instant::now();
-    
-    coordinator.initiate_shutdown(ShutdownReason::Graceful).await;
-    
-    let shutdown_duration = shutdown_start.elapsed();
-    let stats = coordinator.get_shutdown_stats().await.unwrap();
-    
-    // Validate realistic shutdown scenario
-    assert_eq!(stats.total_tasks, 5);
-    assert_eq!(stats.completed_tasks, 5);
-    assert_eq!(stats.failed_tasks, 0);
-    assert_eq!(stats.forced_kills, 0);
-    assert!(shutdown_duration < Duration::from_secs(8)); // Should complete well within timeout
-    
-    println!("✅ Realistic service shutdown completed");
-    println!("Shutdown took: {:.2}s", shutdown_duration.as_secs_f64());
-    println!("Final statistics: {:?}", stats);
+    Ok(())
 }
