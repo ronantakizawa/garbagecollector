@@ -7,4 +7,4 @@ WORKDIR /usr/src/app
 COPY . .
 RUN cargo build --release --features postgres
 
-CMD ["./target/release/gc-sidecar"]
+CMD ["./target/release/garbagetruck"]

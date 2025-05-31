@@ -5,6 +5,7 @@ pub mod service;
 pub mod storage;
 pub mod cleanup;
 pub mod metrics;
+pub mod shutdown;
 
 // Client module (optional)
 #[cfg(feature = "client")]
@@ -20,6 +21,7 @@ pub use config::Config;
 pub use error::{GCError, Result};
 pub use lease::{Lease, ObjectType, LeaseState, CleanupConfig};
 pub use service::GCService;
+pub use shutdown::{ShutdownCoordinator, ShutdownConfig, TaskHandle, TaskType, TaskPriority, ShutdownReason};
 
 // Re-export client when feature is enabled
 #[cfg(feature = "client")]

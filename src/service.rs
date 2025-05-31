@@ -1,4 +1,4 @@
-// src/service.rs - Enhanced with startup metrics integration
+// src/service.rs - Enhanced with graceful shutdown support
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -6,7 +6,7 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 
 use crate::cleanup::CleanupExecutor;
-use crate::config::{Config, ValidationResult};
+use crate::config::Config;
 use crate::error::{GCError, Result};
 use crate::lease::{Lease, LeaseFilter, ObjectType, LeaseState, CleanupConfig};
 use crate::metrics::{Metrics, AlertThresholds};
@@ -17,9 +17,10 @@ use crate::proto::{
     ListLeasesRequest, ListLeasesResponse, HealthCheckRequest, HealthCheckResponse, 
     MetricsRequest, MetricsResponse, LeaseInfo,
 };
+use crate::shutdown::TaskHandle;
 use crate::storage::{create_storage, Storage};
 
-/// GarbageTruck service implementation with enhanced startup and configuration metrics
+/// GarbageTruck service implementation with graceful shutdown support
 #[derive(Clone)]
 pub struct GCService {
     config: Config,
@@ -117,12 +118,6 @@ impl GCService {
         let cleanup_creation_duration = cleanup_creation_start.elapsed();
         metrics.record_component_initialization("cleanup_executor", cleanup_creation_duration);
         
-        // Phase 5: Start alerting monitor
-        let alerting_start = Instant::now();
-        let _alerting_handle = metrics.start_alerting_monitor();
-        let alerting_duration = alerting_start.elapsed();
-        metrics.record_component_initialization("alerting_monitor", alerting_duration);
-        
         let total_service_creation_duration = service_creation_start.elapsed();
         
         info!("✅ GarbageTruck service components initialized in {:.3}s", 
@@ -134,7 +129,6 @@ impl GCService {
         info!("   • Metrics system: {:.3}s", metrics_creation_duration.as_secs_f64());
         info!("   • Storage backend: {:.3}s", storage_creation_start.elapsed().as_secs_f64());
         info!("   • Cleanup executor: {:.3}s", cleanup_creation_duration.as_secs_f64());
-        info!("   • Alerting monitor: {:.3}s", alerting_duration.as_secs_f64());
         
         // Log configuration summary
         let config_summary = config.summary();
@@ -160,7 +154,7 @@ impl GCService {
         self.metrics.clone()
     }
     
-    /// Start the automatic cleanup loop with enhanced metrics
+    /// Start the automatic cleanup loop (legacy method without shutdown support)
     pub async fn start_cleanup_loop(&self) {
         let mut interval = tokio::time::interval(self.config.cleanup_interval());
         let grace_period = self.config.cleanup_grace_period();
@@ -191,6 +185,82 @@ impl GCService {
                         &self.config.storage.backend,
                         "cleanup_cycle_failure"
                     );
+                }
+            }
+        }
+    }
+    
+    /// Start the automatic cleanup loop with graceful shutdown support
+    pub async fn start_cleanup_loop_with_shutdown(&self, mut task_handle: TaskHandle) {
+        let mut interval = tokio::time::interval(self.config.cleanup_interval());
+        let grace_period = self.config.cleanup_grace_period();
+        
+        info!(
+            interval_seconds = self.config.gc.cleanup_interval_seconds,
+            grace_period_seconds = self.config.gc.cleanup_grace_period_seconds,
+            "Starting GarbageTruck cleanup loop with shutdown support"
+        );
+        
+        let mut cleanup_cycles = 0;
+        let start_time = Instant::now();
+        
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let cycle_start = Instant::now();
+                    match self.run_cleanup_cycle(grace_period).await {
+                        Ok(cleaned_count) => {
+                            cleanup_cycles += 1;
+                            let duration = cycle_start.elapsed();
+                            debug!(
+                                cleaned_count = cleaned_count,
+                                duration_ms = duration.as_millis(),
+                                cycle = cleanup_cycles,
+                                "GarbageTruck cleanup cycle completed"
+                            );
+                            
+                            // Log periodic statistics
+                            if cleanup_cycles % 10 == 0 {
+                                info!(
+                                    "Cleanup loop statistics: {} cycles completed in {:.2}s (avg: {:.2}s/cycle)",
+                                    cleanup_cycles,
+                                    start_time.elapsed().as_secs_f64(),
+                                    start_time.elapsed().as_secs_f64() / cleanup_cycles as f64
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            error!(error = %e, cycle = cleanup_cycles, "GarbageTruck cleanup cycle failed");
+                            self.metrics.record_storage_error(
+                                "cleanup_cycle",
+                                &self.config.storage.backend,
+                                "cleanup_cycle_failure"
+                            );
+                        }
+                    }
+                }
+                _ = task_handle.wait_for_shutdown() => {
+                    info!("🛑 Cleanup loop received shutdown signal");
+                    
+                    // Perform one final cleanup cycle before shutting down
+                    info!("🧹 Performing final cleanup cycle before shutdown");
+                    match self.run_cleanup_cycle(grace_period).await {
+                        Ok(cleaned_count) => {
+                            info!("✅ Final cleanup cycle completed: {} items cleaned", cleaned_count);
+                        }
+                        Err(e) => {
+                            warn!("⚠️  Final cleanup cycle failed: {}", e);
+                        }
+                    }
+                    
+                    info!(
+                        "🏁 Cleanup loop shutting down after {} cycles and {:.2}s runtime",
+                        cleanup_cycles,
+                        start_time.elapsed().as_secs_f64()
+                    );
+                    
+                    task_handle.mark_completed().await;
+                    break;
                 }
             }
         }

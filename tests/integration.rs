@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use chrono::{Duration as ChronoDuration, Utc};
 
 // Import from the main crate - using the correct crate name
-use distributed_gc_sidecar::proto::{
+use garbagetruck::proto::{
     distributed_gc_service_client::DistributedGcServiceClient,
     CreateLeaseRequest, RenewLeaseRequest, GetLeaseRequest,
     ReleaseLeaseRequest, ListLeasesRequest, HealthCheckRequest, MetricsRequest,
@@ -19,14 +19,14 @@ use distributed_gc_sidecar::proto::{
 };
 
 // Import storage components for direct testing
-use distributed_gc_sidecar::{
+use garbagetruck::{
     storage::{Storage, MemoryStorage, create_storage},
     config::Config,
     lease::{Lease, LeaseFilter, ObjectType as InternalObjectType, LeaseState as InternalLeaseState, CleanupConfig as InternalCleanupConfig},
 };
 
 #[cfg(feature = "postgres")]
-use distributed_gc_sidecar::storage::PostgresStorage;
+use garbagetruck::storage::PostgresStorage;
 
 // Add SQLx Row trait for try_get method
 #[cfg(feature = "postgres")]

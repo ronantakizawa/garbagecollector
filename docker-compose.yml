@@ -30,7 +30,7 @@ services:
         wait $pid
       "
 
-  gc-sidecar:
+  garbagetruck:
     build:
       context: .
       dockerfile: Dockerfile
@@ -58,7 +58,7 @@ services:
     ports:
       - "9090:9090"
     depends_on:
-      - gc-sidecar
+      - garbagetruck
 
   grafana:
     image: grafana/grafana:latest

@@ -5,7 +5,7 @@ use tokio::runtime::Runtime;
 use uuid::Uuid;
 
 // Import from the main crate
-use distributed_gc_sidecar::proto::{
+use garbagetruck::proto::{
     distributed_gc_service_client::DistributedGcServiceClient,
     CreateLeaseRequest, RenewLeaseRequest, GetLeaseRequest, ListLeasesRequest,
     ObjectType, CleanupConfig,

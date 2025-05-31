@@ -1,19 +1,19 @@
 [package]
-name = "garbagetruck"  # Keep this - it's the crate name
+name = "garbagetruck"  
 version = "0.1.0"
 edition = "2021"
 description = "A lease-based garbage collection sidecar for distributed systems"
 license = "MIT"
-repository = "https://github.com/your-org/garbagecollector"  # Update to match your repo
+repository = "https://github.com/your-org/garbagecollector" 
 keywords = ["grpc", "gc", "sidecar", "microservices", "lease"]
 categories = ["network-programming", "development-tools"]
 
-# Add lib section to make the crate available
+
 [lib]
 name = "garbagetruck"
 path = "src/lib.rs"
 
-# Keep all your existing dependencies exactly as they are
+
 [dependencies]
 # gRPC and protobuf
 tonic = { version = "0.12", features = ["transport"] }
@@ -99,14 +99,13 @@ client = []
 name = "garbagetruck"
 path = "src/main.rs"
 
-# Integration tests
+
 [[test]]
 name = "integration"
 path = "tests/integration.rs"
 
-# Benchmarks
 [[bench]]
-name = "gc_benchmarks"
+name = "benchmark"
 harness = false
 
 # Examples

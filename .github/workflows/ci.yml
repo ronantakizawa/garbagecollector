@@ -28,7 +28,7 @@ jobs:
 
       # Set up Docker Compose
       - name: Set up Docker Compose environment
-        run: docker compose up -d postgres prometheus gc-sidecar
+        run: docker compose up -d postgres prometheus garbagetruck
 
       - name: Wait for Postgres to be healthy
         run: |

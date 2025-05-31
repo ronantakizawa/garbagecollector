@@ -1,3 +1,4 @@
 Cargo.lock
 target
 migrations
+.DS_Store

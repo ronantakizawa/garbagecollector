@@ -118,13 +118,13 @@ User uploads a file → Service receives a 1-hour lease → Service crashes → 
 1. **Clone and build the project**
 ```bash
 git clone <repository-url>
-cd distributed-gc-sidecar
+cd garbagetruck
 cargo build --release
 ```
 
 2. **Start the service locally**
 ```bash
-RUST_LOG=distributed_gc_sidecar=info ./target/release/gc-sidecar
+RUST_LOG=distributed_gc_sidecar=info ./target/release/garbagetruck
 ```
 
 3. **Start the service via Docker-Compose (Includes PostgreSQL, Prometheus, and Grafana Support)**
@@ -261,7 +261,7 @@ async fn handle_websocket_connection(session_id: String, user_id: String) -> Res
 ### 1. Start server
 ```bash
 cargo build
-RUST_LOG=debug ./target/release/gc-sidecar
+RUST_LOG=debug ./target/release/garbagetruck
 ```
 ### 2. Run gRPC Health Check
 ```bash
@@ -289,7 +289,7 @@ grpcurl -plaintext -import-path proto -proto gc_service.proto -d '{"limit": 10}'
 ### 1. Start server
 ```bash
 cargo build
-RUST_LOG=debug ./target/release/gc-sidecar
+RUST_LOG=debug ./target/release/garbagetruck
 ```
 
 ### 2. Run gRPC Tests
@@ -302,7 +302,7 @@ cargo test --features grpc
 ### 1. Start server
 ```bash
 cargo build
-RUST_LOG=debug ./target/release/gc-sidecar
+RUST_LOG=debug ./target/release/garbagetruck
 ```
 
 ### 2. Start a Test Postgres Database (via Docker)
