@@ -4,12 +4,12 @@ use anyhow::Result;
 use std::net::SocketAddr;
 use std::time::Instant;
 use tonic::transport::Server;
-use tracing::{info, warn, error};
+use tracing::{info, error};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::Config;
 use crate::service::GCService;
-use crate::metrics::{MetricsInterceptor, start_system_monitoring};
+use crate::metrics::MetricsInterceptor;
 use crate::shutdown::{ShutdownCoordinator, ShutdownConfig, TaskType, TaskPriority, ShutdownReason};
 use crate::dependencies::DependencyChecker;
 use crate::monitoring::SystemMonitor;
