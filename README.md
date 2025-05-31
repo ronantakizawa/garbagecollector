@@ -40,8 +40,9 @@ User uploads a file → Service receives a 1-hour lease → Service crashes → 
 
 ## 🏗️ Architecture
 
-<img width="562" alt="Screenshot 2025-05-31 at 10 26 12 PM" src="https://github.com/user-attachments/assets/a4ed55ba-d16c-4a5d-a82c-73a82fa253c3" />
-<img width="495" alt="Screenshot 2025-05-31 at 10 34 33 PM" src="https://github.com/user-attachments/assets/33709ee7-7cac-4633-9273-3d58cc60b3a4" />
+<img width="821" alt="Screenshot 2025-05-31 at 10 35 16 PM" src="https://github.com/user-attachments/assets/87cb55b8-e050-40b2-ab90-b05c63f24722" />
+<img width="871" alt="Screenshot 2025-05-31 at 10 35 23 PM" src="https://github.com/user-attachments/assets/f2909eea-6660-4b4f-8c24-4224c1c0c8a6" />
+
 
 
 ## 📦 Use Cases 
