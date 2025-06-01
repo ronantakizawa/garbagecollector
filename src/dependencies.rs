@@ -1,4 +1,4 @@
-// src/dependencies.rs - External dependency checking
+// src/dependencies.rs - Simplified external dependency checking
 
 use anyhow::Result;
 use std::time::Instant;
@@ -10,6 +10,7 @@ use crate::metrics::Metrics;
 /// Handles checking external dependencies during startup
 pub struct DependencyChecker<'a> {
     config: &'a Config,
+    #[allow(dead_code)]
     metrics: &'a std::sync::Arc<Metrics>,
 }
 
@@ -40,11 +41,11 @@ impl<'a> DependencyChecker<'a> {
 
         match self.config.storage.backend.as_str() {
             "memory" => {
-                // Memory storage is always available
                 let duration = storage_check_start.elapsed();
-                self.metrics
-                    .record_component_initialization("storage_memory", duration);
-                info!("✅ Memory storage backend ready");
+                info!(
+                    "✅ Memory storage backend ready in {:.3}s",
+                    duration.as_secs_f64()
+                );
                 Ok(())
             }
             "postgres" => {
@@ -54,9 +55,10 @@ impl<'a> DependencyChecker<'a> {
                         match self.check_postgres_connection(database_url).await {
                             Ok(_) => {
                                 let duration = storage_check_start.elapsed();
-                                self.metrics
-                                    .record_component_initialization("storage_postgres", duration);
-                                info!("✅ PostgreSQL storage backend ready");
+                                info!(
+                                    "✅ PostgreSQL storage backend ready in {:.3}s",
+                                    duration.as_secs_f64()
+                                );
                                 Ok(())
                             }
                             Err(e) => {
@@ -66,32 +68,22 @@ impl<'a> DependencyChecker<'a> {
                                     duration.as_secs_f64(),
                                     e
                                 );
-                                self.metrics.record_startup_error(
-                                    "dependency_check",
-                                    "postgres_connection_failed",
-                                );
                                 Err(anyhow::anyhow!("PostgreSQL connection failed: {}", e))
                             }
                         }
                     } else {
                         error!("❌ PostgreSQL backend selected but no database URL provided");
-                        self.metrics
-                            .record_startup_error("dependency_check", "postgres_no_url");
                         Err(anyhow::anyhow!("PostgreSQL database URL not configured"))
                     }
                 }
                 #[cfg(not(feature = "postgres"))]
                 {
                     error!("❌ PostgreSQL backend selected but postgres feature not enabled");
-                    self.metrics
-                        .record_startup_error("dependency_check", "postgres_feature_disabled");
                     Err(anyhow::anyhow!("PostgreSQL support not compiled in"))
                 }
             }
             backend => {
                 error!("❌ Unknown storage backend: {}", backend);
-                self.metrics
-                    .record_startup_error("dependency_check", "unknown_storage_backend");
                 Err(anyhow::anyhow!("Unknown storage backend: {}", backend))
             }
         }
@@ -126,9 +118,11 @@ impl<'a> DependencyChecker<'a> {
         match self.check_port_availability(self.config.metrics.port).await {
             Ok(_) => {
                 let duration = metrics_check_start.elapsed();
-                self.metrics
-                    .record_component_initialization("metrics_port", duration);
-                info!("✅ Metrics port {} is available", self.config.metrics.port);
+                info!(
+                    "✅ Metrics port {} is available (checked in {:.3}s)",
+                    self.config.metrics.port,
+                    duration.as_secs_f64()
+                );
             }
             Err(e) => {
                 let duration = metrics_check_start.elapsed();

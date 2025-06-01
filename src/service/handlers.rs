@@ -1,4 +1,4 @@
-// src/service/handlers.rs - gRPC method implementations
+// src/service/handlers.rs - Simplified gRPC method implementations
 
 use std::time::{Duration, Instant};
 use tonic::{Request, Response, Status};
@@ -32,12 +32,12 @@ pub trait GCServiceHandlers {
 
 #[async_trait::async_trait]
 impl GCServiceHandlers for GCService {
-    /// Create a new lease for an object with enhanced metrics
+    /// Create a new lease for an object
     async fn create_lease_impl(&self, request: CreateLeaseRequest) -> Result<CreateLeaseResponse> {
-        // Create validator and validate request
+        // Simple validation
         let metrics = self.get_metrics();
         let validator = RequestValidator::new(self.get_config(), &metrics);
-        validator.validate_create_lease_comprehensive(&request)?;
+        validator.validate_create_lease_request(&request)?;
 
         // Check service lease limits
         self.check_service_lease_limit(&request.service_id).await?;
@@ -67,7 +67,7 @@ impl GCServiceHandlers for GCService {
 
         match self.storage.create_lease(lease.clone()).await {
             Ok(_) => {
-                // Update metrics for successful lease creation
+                // Record successful lease creation
                 self.metrics
                     .lease_created(&lease.service_id, &format!("{:?}", lease.object_type));
                 self.metrics
@@ -92,8 +92,7 @@ impl GCServiceHandlers for GCService {
                 })
             }
             Err(e) => {
-                // Update metrics for failed lease creation
-                self.metrics.lease_creation_failed("storage_error");
+                // Record failed lease creation
                 self.metrics.record_storage_error(
                     "create_lease",
                     &self.config.storage.backend,
@@ -106,7 +105,7 @@ impl GCServiceHandlers for GCService {
 
     /// Renew an existing lease to extend its lifetime
     async fn renew_lease_impl(&self, request: RenewLeaseRequest) -> Result<RenewLeaseResponse> {
-        // Validate request
+        // Simple validation
         let metrics = self.get_metrics();
         let validator = RequestValidator::new(self.get_config(), &metrics);
         validator.validate_renew_lease_request(&request)?;
@@ -159,7 +158,7 @@ impl GCServiceHandlers for GCService {
 
         match self.storage.update_lease(lease.clone()).await {
             Ok(_) => {
-                // Update metrics
+                // Record successful renewal
                 self.metrics.lease_renewed();
                 self.metrics
                     .record_storage_operation("update_lease", &self.config.storage.backend);
@@ -196,7 +195,7 @@ impl GCServiceHandlers for GCService {
         &self,
         request: ReleaseLeaseRequest,
     ) -> Result<ReleaseLeaseResponse> {
-        // Validate request
+        // Simple validation
         let metrics = self.get_metrics();
         let validator = RequestValidator::new(self.get_config(), &metrics);
         validator.validate_release_lease_request(&request)?;
@@ -234,7 +233,7 @@ impl GCServiceHandlers for GCService {
 
         match self.storage.update_lease(lease.clone()).await {
             Ok(_) => {
-                // Update metrics
+                // Record successful release
                 self.metrics
                     .lease_released(&lease.service_id, &format!("{:?}", lease.object_type));
                 self.metrics
@@ -265,7 +264,7 @@ impl GCServiceHandlers for GCService {
 
     /// Get information about a specific lease
     async fn get_lease_impl(&self, request: GetLeaseRequest) -> Result<GetLeaseResponse> {
-        // Validate lease ID format
+        // Simple validation
         let metrics = self.get_metrics();
         let validator = RequestValidator::new(self.get_config(), &metrics);
         validator.validate_lease_id(&request.lease_id)?;
@@ -355,19 +354,16 @@ impl GCServiceHandlers for GCService {
         }
     }
 
-    /// Check the health status of the GarbageTruck service with startup metrics
+    /// Check the health status of the GarbageTruck service
     async fn health_check_impl(&self, _request: HealthCheckRequest) -> Result<HealthCheckResponse> {
         match self.storage.get_stats().await {
             Ok(stats) => {
                 self.metrics
                     .record_storage_operation("get_stats", &self.config.storage.backend);
 
-                // Get alert summary for health status
-                let alert_summary = self.metrics.get_alert_summary().await;
-                let is_healthy = alert_summary.fatal_alerts == 0;
-
+                // Simple health check - if we can get stats, we're healthy
                 Ok(HealthCheckResponse {
-                    healthy: is_healthy,
+                    healthy: true,
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     active_leases: stats.active_leases as u64,
                     expired_leases: stats.expired_leases as u64,
@@ -388,7 +384,7 @@ impl GCServiceHandlers for GCService {
         }
     }
 
-    /// Get comprehensive metrics about the GarbageTruck service including startup metrics
+    /// Get metrics about the GarbageTruck service
     async fn get_metrics_impl(&self, _request: MetricsRequest) -> Result<MetricsResponse> {
         match self.storage.get_stats().await {
             Ok(stats) => {
@@ -447,28 +443,13 @@ impl crate::proto::distributed_gc_service_server::DistributedGcService for GCSer
             Ok(response) => {
                 self.metrics
                     .record_request("create_lease", "success", duration);
-                self.metrics
-                    .grpc_requests_total
-                    .with_label_values(&["create_lease"])
-                    .inc();
                 Ok(Response::new(response))
             }
             Err(e) => {
                 self.metrics
                     .record_request("create_lease", "error", duration);
-                self.metrics
-                    .grpc_requests_total
-                    .with_label_values(&["create_lease"])
-                    .inc();
                 error!(error = %e, "Failed to create lease");
-
-                let response = CreateLeaseResponse {
-                    lease_id: String::new(),
-                    expires_at: None,
-                    success: false,
-                    error_message: e.to_string(),
-                };
-                Ok(Response::new(response))
+                Err(Status::from(e))
             }
         }
     }
@@ -488,19 +469,11 @@ impl crate::proto::distributed_gc_service_server::DistributedGcService for GCSer
             Ok(response) => {
                 self.metrics
                     .record_request("renew_lease", "success", duration);
-                self.metrics
-                    .grpc_requests_total
-                    .with_label_values(&["renew_lease"])
-                    .inc();
                 Ok(Response::new(response))
             }
             Err(e) => {
                 self.metrics
                     .record_request("renew_lease", "error", duration);
-                self.metrics
-                    .grpc_requests_total
-                    .with_label_values(&["renew_lease"])
-                    .inc();
                 error!(lease_id = %lease_id, error = %e, "Failed to renew lease");
 
                 let response = RenewLeaseResponse {
@@ -528,19 +501,11 @@ impl crate::proto::distributed_gc_service_server::DistributedGcService for GCSer
             Ok(response) => {
                 self.metrics
                     .record_request("release_lease", "success", duration);
-                self.metrics
-                    .grpc_requests_total
-                    .with_label_values(&["release_lease"])
-                    .inc();
                 Ok(Response::new(response))
             }
             Err(e) => {
                 self.metrics
                     .record_request("release_lease", "error", duration);
-                self.metrics
-                    .grpc_requests_total
-                    .with_label_values(&["release_lease"])
-                    .inc();
                 error!(lease_id = %lease_id, error = %e, "Failed to release lease");
 
                 let response = ReleaseLeaseResponse {
@@ -566,18 +531,10 @@ impl crate::proto::distributed_gc_service_server::DistributedGcService for GCSer
             Ok(response) => {
                 self.metrics
                     .record_request("get_lease", "success", duration);
-                self.metrics
-                    .grpc_requests_total
-                    .with_label_values(&["get_lease"])
-                    .inc();
                 Ok(Response::new(response))
             }
             Err(e) => {
                 self.metrics.record_request("get_lease", "error", duration);
-                self.metrics
-                    .grpc_requests_total
-                    .with_label_values(&["get_lease"])
-                    .inc();
                 error!(error = %e, "Failed to get lease");
                 Err(Status::from(e))
             }
@@ -598,19 +555,11 @@ impl crate::proto::distributed_gc_service_server::DistributedGcService for GCSer
             Ok(response) => {
                 self.metrics
                     .record_request("list_leases", "success", duration);
-                self.metrics
-                    .grpc_requests_total
-                    .with_label_values(&["list_leases"])
-                    .inc();
                 Ok(Response::new(response))
             }
             Err(e) => {
                 self.metrics
                     .record_request("list_leases", "error", duration);
-                self.metrics
-                    .grpc_requests_total
-                    .with_label_values(&["list_leases"])
-                    .inc();
                 error!(error = %e, "Failed to list leases");
                 Err(Status::from(e))
             }
@@ -631,19 +580,11 @@ impl crate::proto::distributed_gc_service_server::DistributedGcService for GCSer
             Ok(response) => {
                 self.metrics
                     .record_request("health_check", "success", duration);
-                self.metrics
-                    .grpc_requests_total
-                    .with_label_values(&["health_check"])
-                    .inc();
                 Ok(Response::new(response))
             }
             Err(e) => {
                 self.metrics
                     .record_request("health_check", "error", duration);
-                self.metrics
-                    .grpc_requests_total
-                    .with_label_values(&["health_check"])
-                    .inc();
                 error!(error = %e, "Health check failed");
                 Err(Status::from(e))
             }
@@ -664,19 +605,11 @@ impl crate::proto::distributed_gc_service_server::DistributedGcService for GCSer
             Ok(response) => {
                 self.metrics
                     .record_request("get_metrics", "success", duration);
-                self.metrics
-                    .grpc_requests_total
-                    .with_label_values(&["get_metrics"])
-                    .inc();
                 Ok(Response::new(response))
             }
             Err(e) => {
                 self.metrics
                     .record_request("get_metrics", "error", duration);
-                self.metrics
-                    .grpc_requests_total
-                    .with_label_values(&["get_metrics"])
-                    .inc();
                 error!(error = %e, "Failed to get metrics");
                 Err(Status::from(e))
             }

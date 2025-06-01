@@ -1,4 +1,4 @@
-// src/metrics/interceptors.rs - gRPC interceptors for metrics collection
+// src/metrics/interceptors.rs - Fixed gRPC interceptors for metrics collection
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -24,8 +24,8 @@ impl tonic::service::Interceptor for MetricsInterceptor {
         // For now, just increment a general request counter
         // The method name will be tracked in the service methods themselves
         self.metrics
-            .grpc_requests_total
-            .with_label_values(&["all"])
+            .request_total
+            .with_label_values(&["all", "received"])
             .inc();
 
         // Store start time in request extensions for duration tracking

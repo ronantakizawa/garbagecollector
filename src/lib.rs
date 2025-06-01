@@ -7,9 +7,8 @@ pub mod service;
 pub mod shutdown;
 pub mod storage;
 
-// NEW: Startup and monitoring modules
+// Startup and dependencies modules
 pub mod dependencies;
-pub mod monitoring;
 pub mod startup;
 
 // Client module (optional)
@@ -31,9 +30,7 @@ pub use shutdown::{
 };
 pub use storage::{create_storage, Storage};
 
-// Re-export new modules
-pub use dependencies::DependencyChecker;
-pub use monitoring::SystemMonitor;
+// Re-export startup
 pub use startup::ApplicationStartup;
 
 // Re-export client when feature is enabled
