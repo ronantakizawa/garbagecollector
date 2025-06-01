@@ -187,7 +187,9 @@ impl Metrics {
     pub fn lease_created(&self, service_id: &str, object_type: &str) {
         self.leases_created_total.inc();
         self.active_leases.inc();
-        self.leases_by_service.with_label_values(&[service_id]).inc();
+        self.leases_by_service
+            .with_label_values(&[service_id])
+            .inc();
         self.leases_by_type.with_label_values(&[object_type]).inc();
     }
 
@@ -198,14 +200,18 @@ impl Metrics {
     pub fn lease_expired(&self, service_id: &str, object_type: &str) {
         self.leases_expired_total.inc();
         self.active_leases.dec();
-        self.leases_by_service.with_label_values(&[service_id]).dec();
+        self.leases_by_service
+            .with_label_values(&[service_id])
+            .dec();
         self.leases_by_type.with_label_values(&[object_type]).dec();
     }
 
     pub fn lease_released(&self, service_id: &str, object_type: &str) {
         self.leases_released_total.inc();
         self.active_leases.dec();
-        self.leases_by_service.with_label_values(&[service_id]).dec();
+        self.leases_by_service
+            .with_label_values(&[service_id])
+            .dec();
         self.leases_by_type.with_label_values(&[object_type]).dec();
     }
 

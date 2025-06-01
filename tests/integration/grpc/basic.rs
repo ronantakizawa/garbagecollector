@@ -1,9 +1,9 @@
 // tests/integration/grpc/basic.rs - Basic gRPC operation tests
 
 use anyhow::Result;
-use uuid::Uuid;
 use std::collections::HashMap;
 use tonic::Request;
+use uuid::Uuid;
 
 use garbagetruck::proto::{
     CreateLeaseRequest, GetLeaseRequest, HealthCheckRequest, LeaseState, ListLeasesRequest,
@@ -229,10 +229,12 @@ async fn test_invalid_lease_duration() {
     use crate::integration::print_test_success;
 
     print_test_header("Testing invalid lease duration handling", "⏱️");
-    
+
     // Use the existing TestHarness which handles the gRPC client setup
-    let mut harness = TestHarness::new().await.expect("Failed to setup test harness");
-    
+    let mut harness = TestHarness::new()
+        .await
+        .expect("Failed to setup test harness");
+
     // Test 1: Duration too short (should fail)
     let short_duration_request = CreateLeaseRequest {
         object_id: "test-object-short".to_string(),
@@ -244,8 +246,11 @@ async fn test_invalid_lease_duration() {
     };
 
     let short_result = harness.gc_client.create_lease(short_duration_request).await;
-    assert!(short_result.is_err(), "Should reject duration that's too short");
-    
+    assert!(
+        short_result.is_err(),
+        "Should reject duration that's too short"
+    );
+
     if let Err(status) = short_result {
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
         assert!(status.message().contains("Invalid lease duration"));
@@ -253,7 +258,7 @@ async fn test_invalid_lease_duration() {
         println!("✅ Correctly rejected short duration: {}", status.message());
     }
 
-    // Test 2: Duration too long (should fail)  
+    // Test 2: Duration too long (should fail)
     let long_duration_request = CreateLeaseRequest {
         object_id: "test-object-long".to_string(),
         object_type: ObjectType::DatabaseRow as i32,
@@ -264,8 +269,11 @@ async fn test_invalid_lease_duration() {
     };
 
     let long_result = harness.gc_client.create_lease(long_duration_request).await;
-    assert!(long_result.is_err(), "Should reject duration that's too long");
-    
+    assert!(
+        long_result.is_err(),
+        "Should reject duration that's too long"
+    );
+
     if let Err(status) = long_result {
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
         assert!(status.message().contains("Invalid lease duration"));
@@ -285,12 +293,18 @@ async fn test_invalid_lease_duration() {
 
     let valid_result = harness.gc_client.create_lease(valid_duration_request).await;
     assert!(valid_result.is_ok(), "Should accept valid duration");
-    
+
     if let Ok(response) = valid_result {
         let create_response = response.into_inner();
         assert!(create_response.success, "Lease creation should succeed");
-        assert!(!create_response.lease_id.is_empty(), "Should return lease ID");
-        println!("✅ Correctly accepted valid duration: {}", create_response.lease_id);
+        assert!(
+            !create_response.lease_id.is_empty(),
+            "Should return lease ID"
+        );
+        println!(
+            "✅ Correctly accepted valid duration: {}",
+            create_response.lease_id
+        );
     }
 
     print_test_success("Invalid lease duration handling");

@@ -43,7 +43,10 @@ impl GCService {
 
         // Create storage backend
         let storage = create_storage(&config).await?;
-        info!("✅ Storage backend '{}' initialized", config.storage.backend);
+        info!(
+            "✅ Storage backend '{}' initialized",
+            config.storage.backend
+        );
 
         // Create cleanup executor
         let cleanup_executor = CleanupExecutor::new(
@@ -161,7 +164,10 @@ impl GCService {
             return Ok(0);
         }
 
-        info!(count = expired_leases.len(), "Found expired leases to clean up");
+        info!(
+            count = expired_leases.len(),
+            "Found expired leases to clean up"
+        );
 
         // Execute cleanup operations
         let cleanup_results = self
