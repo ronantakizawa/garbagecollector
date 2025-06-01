@@ -64,6 +64,9 @@ thiserror = "1.0"
 # Client-specific dependencies
 fastrand = "2.0"
 
+# CLI dependencies
+clap = { version = "4.4", features = ["derive", "env"] }
+
 [dev-dependencies]
 # Testing framework
 tokio-test = "0.4"
@@ -96,10 +99,16 @@ grpc = []
 postgres = ["sqlx/postgres", "sqlx/runtime-tokio-native-tls"]
 client = []
 
-# UPDATED: Binary now points to bin/main.rs
+# Main server binary
+[[bin]]
+name = "garbagetruck-server"
+path = "src/bin/main.rs"
+
+# CLI binary (primary interface)
 [[bin]]
 name = "garbagetruck"
-path = "src/bin/main.rs"
+path = "src/bin/cli/main.rs"
+required-features = ["client"]
 
 [[bench]]
 name = "benchmark"

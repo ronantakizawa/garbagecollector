@@ -30,7 +30,7 @@ services:
         wait $pid
       "
 
-  garbagetruck:
+  garbagetruck-server:
     build:
       context: .
       dockerfile: Dockerfile
@@ -58,7 +58,7 @@ services:
     ports:
       - "9090:9090"
     depends_on:
-      - garbagetruck
+      - garbagetruck-sevrer
 
   grafana:
     image: grafana/grafana:latest
