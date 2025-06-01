@@ -92,7 +92,7 @@ jobs:
       - name: Start GarbageTruck service in background
         run: |
           # Start the service in the background
-          cargo run --bin garbagetruck --all-features &
+          cargo run --bin garbagetruck-server --all-features &
           GARBAGETRUCK_PID=$!
           echo "GARBAGETRUCK_PID=$GARBAGETRUCK_PID" >> $GITHUB_ENV
           

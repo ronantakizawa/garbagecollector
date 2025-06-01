@@ -153,7 +153,10 @@ async fn main() -> Result<()> {
     let mut client = match GCClient::new(&cli.endpoint, cli.service_id.clone()).await {
         Ok(client) => client,
         Err(e) => {
-            error!("Failed to connect to GarbageTruck at {}: {}", cli.endpoint, e);
+            error!(
+                "Failed to connect to GarbageTruck at {}: {}",
+                cli.endpoint, e
+            );
             std::process::exit(1);
         }
     };
@@ -199,7 +202,14 @@ async fn handle_status(client: &mut GCClient) -> Result<()> {
         Ok(is_healthy) => {
             println!("🚛 GarbageTruck Service Status");
             println!("═══════════════════════════════");
-            println!("Health: {}", if is_healthy { "✅ Healthy" } else { "❌ Unhealthy" });
+            println!(
+                "Health: {}",
+                if is_healthy {
+                    "✅ Healthy"
+                } else {
+                    "❌ Unhealthy"
+                }
+            );
         }
         Err(e) => {
             println!("❌ Failed to get status: {}", e);
@@ -216,14 +226,18 @@ async fn handle_status(client: &mut GCClient) -> Result<()> {
 
             for lease in &leases {
                 *by_service.entry(lease.service_id.clone()).or_insert(0) += 1;
-                let type_name = format!("{:?}", ObjectType::from(
-                    garbagetruck::proto::ObjectType::try_from(lease.object_type).unwrap_or_default()
-                ));
+                let type_name = format!(
+                    "{:?}",
+                    ObjectType::from(
+                        garbagetruck::proto::ObjectType::try_from(lease.object_type)
+                            .unwrap_or_default()
+                    )
+                );
                 *by_type.entry(type_name).or_insert(0) += 1;
             }
 
             println!("Total Active Leases: {}", total_leases);
-            
+
             if !by_service.is_empty() {
                 println!("\nLeases by Service:");
                 for (service, count) in by_service {
@@ -260,14 +274,12 @@ async fn handle_lease_command(client: &mut GCClient, action: LeaseAction) -> Res
 
             let metadata_map: HashMap<String, String> = metadata.into_iter().collect();
 
-            let cleanup_config = cleanup_endpoint.map(|endpoint| {
-                garbagetruck::CleanupConfig {
-                    cleanup_endpoint: String::new(),
-                    cleanup_http_endpoint: endpoint,
-                    cleanup_payload: cleanup_payload.unwrap_or_default(),
-                    max_retries: 3,
-                    retry_delay_seconds: 2,
-                }
+            let cleanup_config = cleanup_endpoint.map(|endpoint| garbagetruck::CleanupConfig {
+                cleanup_endpoint: String::new(),
+                cleanup_http_endpoint: endpoint,
+                cleanup_payload: cleanup_payload.unwrap_or_default(),
+                max_retries: 3,
+                retry_delay_seconds: 2,
             });
 
             match client
@@ -318,16 +330,21 @@ async fn handle_lease_command(client: &mut GCClient, action: LeaseAction) -> Res
                         println!("  Object ID: {}", lease.object_id);
                         println!("  Service: {}", lease.service_id);
                         println!("  Type: {}", obj_type);
-                        println!("  State: {:?}", garbagetruck::proto::LeaseState::try_from(lease.state).unwrap_or_default());
-                        
+                        println!(
+                            "  State: {:?}",
+                            garbagetruck::proto::LeaseState::try_from(lease.state)
+                                .unwrap_or_default()
+                        );
+
                         if let Some(expires_at) = lease.expires_at {
                             let expires = chrono::DateTime::<chrono::Utc>::from_timestamp(
-                                expires_at.seconds, 
-                                expires_at.nanos as u32
-                            ).unwrap_or_default();
+                                expires_at.seconds,
+                                expires_at.nanos as u32,
+                            )
+                            .unwrap_or_default();
                             println!("  Expires: {}", expires.format("%Y-%m-%d %H:%M:%S UTC"));
                         }
-                        
+
                         println!("  Renewals: {}", lease.renewal_count);
                         println!("───────────────────────────────────────────────────────────");
                     }
@@ -353,24 +370,29 @@ async fn handle_lease_command(client: &mut GCClient, action: LeaseAction) -> Res
                     println!("Object ID: {}", lease.object_id);
                     println!("Service ID: {}", lease.service_id);
                     println!("Object Type: {}", obj_type);
-                    println!("State: {:?}", garbagetruck::proto::LeaseState::try_from(lease.state).unwrap_or_default());
-                    
+                    println!(
+                        "State: {:?}",
+                        garbagetruck::proto::LeaseState::try_from(lease.state).unwrap_or_default()
+                    );
+
                     if let Some(created_at) = lease.created_at {
                         let created = chrono::DateTime::<chrono::Utc>::from_timestamp(
-                            created_at.seconds, 
-                            created_at.nanos as u32
-                        ).unwrap_or_default();
+                            created_at.seconds,
+                            created_at.nanos as u32,
+                        )
+                        .unwrap_or_default();
                         println!("Created: {}", created.format("%Y-%m-%d %H:%M:%S UTC"));
                     }
-                    
+
                     if let Some(expires_at) = lease.expires_at {
                         let expires = chrono::DateTime::<chrono::Utc>::from_timestamp(
-                            expires_at.seconds, 
-                            expires_at.nanos as u32
-                        ).unwrap_or_default();
+                            expires_at.seconds,
+                            expires_at.nanos as u32,
+                        )
+                        .unwrap_or_default();
                         println!("Expires: {}", expires.format("%Y-%m-%d %H:%M:%S UTC"));
                     }
-                    
+
                     println!("Renewal Count: {}", lease.renewal_count);
 
                     if !lease.metadata.is_empty() {
