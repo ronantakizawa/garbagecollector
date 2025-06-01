@@ -2,9 +2,11 @@
 
 use anyhow::Result;
 use uuid::Uuid;
+use std::collections::HashMap;
+use tonic::Request;
 
 use garbagetruck::proto::{
-    GetLeaseRequest, HealthCheckRequest, LeaseState, ListLeasesRequest, ObjectType,
+    CreateLeaseRequest, GetLeaseRequest, HealthCheckRequest, LeaseState, ListLeasesRequest,
     ReleaseLeaseRequest, RenewLeaseRequest,
 };
 
@@ -34,6 +36,8 @@ async fn test_health_check() -> Result<()> {
 #[cfg(feature = "grpc")]
 #[tokio::test]
 async fn test_lease_creation_and_retrieval() -> Result<()> {
+    use garbagetruck::ObjectType;
+
     print_test_header("lease creation and retrieval", "📝");
 
     let mut harness = TestHarness::new().await?;
@@ -219,41 +223,75 @@ async fn test_list_leases() -> Result<()> {
 
 #[cfg(feature = "grpc")]
 #[tokio::test]
-async fn test_invalid_lease_duration() -> Result<()> {
-    print_test_header("invalid lease duration handling", "⏱️");
+async fn test_invalid_lease_duration() {
+    use garbagetruck::ObjectType;
 
-    let mut harness = TestHarness::new().await?;
+    use crate::integration::print_test_success;
 
-    // Test duration too short (minimum is 30 seconds)
-    let request = super::create_lease_request(
-        "invalid-duration-test",
-        ObjectType::TemporaryFile,
-        "test-service",
-        10, // Too short
-    );
+    print_test_header("Testing invalid lease duration handling", "⏱️");
+    
+    // Use the existing TestHarness which handles the gRPC client setup
+    let mut harness = TestHarness::new().await.expect("Failed to setup test harness");
+    
+    // Test 1: Duration too short (should fail)
+    let short_duration_request = CreateLeaseRequest {
+        object_id: "test-object-short".to_string(),
+        object_type: ObjectType::DatabaseRow as i32,
+        service_id: "test-service".to_string(),
+        lease_duration_seconds: 10, // Less than min (30)
+        metadata: HashMap::new(),
+        cleanup_config: None,
+    };
 
-    let response = harness.gc_client.create_lease(request).await?;
-    let result = response.into_inner();
+    let short_result = harness.gc_client.create_lease(short_duration_request).await;
+    assert!(short_result.is_err(), "Should reject duration that's too short");
+    
+    if let Err(status) = short_result {
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("Invalid lease duration"));
+        assert!(status.message().contains("min: 30"));
+        println!("✅ Correctly rejected short duration: {}", status.message());
+    }
 
-    assert!(!result.success, "Should reject too-short duration");
-    assert!(
-        result.error_message.contains("Invalid lease duration"),
-        "Error should mention invalid duration"
-    );
+    // Test 2: Duration too long (should fail)  
+    let long_duration_request = CreateLeaseRequest {
+        object_id: "test-object-long".to_string(),
+        object_type: ObjectType::DatabaseRow as i32,
+        service_id: "test-service".to_string(),
+        lease_duration_seconds: 7200, // More than max (3600)
+        metadata: HashMap::new(),
+        cleanup_config: None,
+    };
 
-    // Test duration too long (maximum is 3600 seconds)
-    let request = super::create_lease_request(
-        "invalid-duration-test-2",
-        ObjectType::TemporaryFile,
-        "test-service",
-        7200, // Too long
-    );
+    let long_result = harness.gc_client.create_lease(long_duration_request).await;
+    assert!(long_result.is_err(), "Should reject duration that's too long");
+    
+    if let Err(status) = long_result {
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("Invalid lease duration"));
+        assert!(status.message().contains("max: 3600"));
+        println!("✅ Correctly rejected long duration: {}", status.message());
+    }
 
-    let response = harness.gc_client.create_lease(request).await?;
-    let result = response.into_inner();
+    // Test 3: Valid duration (should succeed)
+    let valid_duration_request = CreateLeaseRequest {
+        object_id: "test-object-valid".to_string(),
+        object_type: ObjectType::DatabaseRow as i32,
+        service_id: "test-service".to_string(),
+        lease_duration_seconds: 300, // Within range (30-3600)
+        metadata: HashMap::new(),
+        cleanup_config: None,
+    };
 
-    assert!(!result.success, "Should reject too-long duration");
+    let valid_result = harness.gc_client.create_lease(valid_duration_request).await;
+    assert!(valid_result.is_ok(), "Should accept valid duration");
+    
+    if let Ok(response) = valid_result {
+        let create_response = response.into_inner();
+        assert!(create_response.success, "Lease creation should succeed");
+        assert!(!create_response.lease_id.is_empty(), "Should return lease ID");
+        println!("✅ Correctly accepted valid duration: {}", create_response.lease_id);
+    }
 
-    println!("✅ Invalid lease duration handling passed");
-    Ok(())
+    print_test_success("Invalid lease duration handling");
 }
