@@ -30,11 +30,12 @@ path = "src/lib.rs"
 tonic = { version = "0.12", features = ["transport"] }
 prost = "0.13"
 prost-types = "0.13"
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "1.0", features = ["full", "macros"] }
 tokio-stream = "0.1"
 
-# HTTP client
+# HTTP client and server
 reqwest = { version = "0.12", features = ["json"] }
+warp = "0.3"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -83,9 +84,6 @@ clap = { version = "4.4", features = ["derive", "env"], optional = true }
 tokio-test = "0.4"
 tempfile = "3.8"
 
-# HTTP server for mock cleanup endpoint
-warp = "0.3"
-
 # Additional utilities for testing
 pretty_assertions = "1.4"
 serial_test = "3.0"
@@ -113,6 +111,12 @@ required-features = ["server"]
 [[bin]]
 name = "garbagetruck"
 path = "src/bin/cli/main.rs"
+required-features = ["client"]
+
+# Experiment binary
+[[bin]]
+name = "garbagetruck-experiment"
+path = "src/bin/experiment/main.rs"
 required-features = ["client"]
 
 [[bench]]

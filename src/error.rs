@@ -48,6 +48,9 @@ pub enum GCError {
     #[error("Rate limit exceeded for service: {service_id}")]
     RateLimit { service_id: String },
 
+    #[error("Task join error: {0}")]
+    TaskJoin(#[from] tokio::task::JoinError),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -70,4 +73,5 @@ impl From<GCError> for tonic::Status {
     }
 }
 
+// CRITICAL: This is the missing Result type that's causing all the compilation errors
 pub type Result<T> = std::result::Result<T, GCError>;

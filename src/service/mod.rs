@@ -1,250 +1,127 @@
-// src/service/mod.rs - Simplified service creation
+// src/service/mod.rs - Updated with cleanup loop integration
+
+mod cleanup_loop;
+mod handlers;
+mod validation;
+
+pub use cleanup_loop::{CleanupLoop, CleanupResult};
+pub use handlers::GCServiceHandlers;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tracing::{debug, error, info, warn};
+use std::time::Instant;
+use tokio::sync::watch;
+use tonic::transport::Server;
+use tracing::{error, info, warn};
 
-use crate::cleanup::CleanupExecutor;
 use crate::config::Config;
 use crate::error::{GCError, Result};
 use crate::lease::{LeaseFilter, LeaseState};
 use crate::metrics::Metrics;
-use crate::shutdown::TaskHandle;
-use crate::storage::{create_storage, Storage};
+use crate::proto::distributed_gc_service_server::DistributedGcServiceServer;
+use crate::storage::Storage;
 
-// Re-export submodules
-pub mod handlers;
-pub mod validation;
-
-// Re-export the handlers trait for external use
-pub use handlers::GCServiceHandlers;
-
-/// GarbageTruck service implementation with graceful shutdown support
+/// Main GarbageTruck service
 #[derive(Clone)]
 pub struct GCService {
-    config: Config,
-    storage: Arc<dyn Storage + Send + Sync>,
-    cleanup_executor: CleanupExecutor,
-    metrics: Arc<Metrics>,
-    start_time: std::time::Instant,
+    pub(crate) storage: Arc<dyn Storage>,
+    pub(crate) config: Arc<Config>,
+    pub(crate) metrics: Arc<Metrics>,
+    pub(crate) start_time: Instant,
+    cleanup_shutdown_tx: Arc<watch::Sender<bool>>,
 }
 
 impl GCService {
-    /// Create a new GarbageTruck service instance - simplified
-    pub async fn new(config: Config) -> Result<Self> {
-        let service_creation_start = Instant::now();
+    /// Create a new GCService instance
+    pub fn new(storage: Arc<dyn Storage>, config: Arc<Config>, metrics: Arc<Metrics>) -> Self {
+        let (cleanup_shutdown_tx, _) = watch::channel(false);
 
-        // Validate configuration - simple validation only
-        config.validate()?;
-        info!("✅ Configuration validated");
-
-        // Create metrics system - no alerting
-        let metrics = Arc::new(Metrics::new().map_err(|e| GCError::Internal(e.to_string()))?);
-
-        // Create storage backend
-        let storage = create_storage(&config).await?;
-        info!(
-            "✅ Storage backend '{}' initialized",
-            config.storage.backend
-        );
-
-        // Create cleanup executor
-        let cleanup_executor = CleanupExecutor::new(
-            Duration::from_secs(config.cleanup.default_timeout_seconds),
-            config.cleanup.default_max_retries,
-            Duration::from_secs(config.cleanup.default_retry_delay_seconds),
-        );
-
-        let total_duration = service_creation_start.elapsed();
-        info!(
-            "✅ GarbageTruck service initialized in {:.3}s",
-            total_duration.as_secs_f64()
-        );
-
-        Ok(Self {
-            config,
+        Self {
             storage,
-            cleanup_executor,
+            config,
             metrics,
             start_time: Instant::now(),
-        })
+            cleanup_shutdown_tx: Arc::new(cleanup_shutdown_tx),
+        }
     }
 
-    /// Get a reference to the metrics for use in middleware
-    pub fn get_metrics(&self) -> Arc<Metrics> {
-        self.metrics.clone()
-    }
+    /// Start the gRPC server and cleanup loop
+    pub async fn start(&self, addr: std::net::SocketAddr) -> Result<()> {
+        info!("🚀 Starting GarbageTruck service on {}", addr);
 
-    /// Get a reference to the configuration
-    pub fn get_config(&self) -> &Config {
-        &self.config
-    }
+        // Start the cleanup loop in a separate task
+        let cleanup_handle = self.start_cleanup_loop().await?;
 
-    /// Get a reference to the storage backend
-    pub fn get_storage(&self) -> &Arc<dyn Storage + Send + Sync> {
-        &self.storage
-    }
+        // Start the gRPC server
+        let server_handle = self.start_grpc_server(addr).await?;
 
-    /// Get a reference to the cleanup executor
-    pub fn get_cleanup_executor(&self) -> &CleanupExecutor {
-        &self.cleanup_executor
-    }
-
-    /// Get service start time
-    pub fn get_start_time(&self) -> Instant {
-        self.start_time
-    }
-
-    /// Start the automatic cleanup loop with graceful shutdown support
-    pub async fn start_cleanup_loop_with_shutdown(&self, mut task_handle: TaskHandle) {
-        let mut interval = tokio::time::interval(self.config.cleanup_interval());
-        let grace_period = self.config.cleanup_grace_period();
-
-        info!(
-            interval_seconds = self.config.gc.cleanup_interval_seconds,
-            grace_period_seconds = self.config.gc.cleanup_grace_period_seconds,
-            "Starting GarbageTruck cleanup loop"
-        );
-
-        let mut cleanup_cycles = 0;
-
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    let cycle_start = Instant::now();
-                    match self.run_cleanup_cycle(grace_period).await {
-                        Ok(cleaned_count) => {
-                            cleanup_cycles += 1;
-                            let duration = cycle_start.elapsed();
-                            debug!(
-                                cleaned_count = cleaned_count,
-                                duration_ms = duration.as_millis(),
-                                cycle = cleanup_cycles,
-                                "Cleanup cycle completed"
-                            );
-                        }
-                        Err(e) => {
-                            error!(error = %e, cycle = cleanup_cycles, "Cleanup cycle failed");
-                            self.metrics.record_storage_error(
-                                "cleanup_cycle",
-                                &self.config.storage.backend,
-                                "cleanup_cycle_failure"
-                            );
-                        }
-                    }
-                }
-                _ = task_handle.wait_for_shutdown() => {
-                    info!("🛑 Cleanup loop received shutdown signal");
-
-                    // Perform one final cleanup cycle
-                    info!("🧹 Performing final cleanup cycle");
-                    match self.run_cleanup_cycle(grace_period).await {
-                        Ok(cleaned_count) => {
-                            info!("✅ Final cleanup: {} items cleaned", cleaned_count);
-                        }
-                        Err(e) => {
-                            warn!("⚠️  Final cleanup failed: {}", e);
-                        }
-                    }
-
-                    info!("🏁 Cleanup loop shutting down after {} cycles", cleanup_cycles);
-                    task_handle.mark_completed().await;
-                    break;
-                }
+        // Wait for either task to complete (or fail)
+        tokio::select! {
+            result = cleanup_handle => {
+                error!("Cleanup loop exited: {:?}", result);
+                result??;
             }
-        }
-    }
-
-    /// Run a single cleanup cycle - simplified
-    pub(crate) async fn run_cleanup_cycle(&self, grace_period: Duration) -> Result<usize> {
-        // Get expired leases
-        let expired_leases = self.storage.get_expired_leases(grace_period).await?;
-
-        if expired_leases.is_empty() {
-            return Ok(0);
-        }
-
-        info!(
-            count = expired_leases.len(),
-            "Found expired leases to clean up"
-        );
-
-        // Execute cleanup operations
-        let cleanup_results = self
-            .cleanup_executor
-            .cleanup_batch(expired_leases.clone())
-            .await;
-
-        let mut successful_cleanups = 0;
-        let mut failed_cleanups = 0;
-
-        // Update lease states based on cleanup results
-        for (lease, result) in expired_leases.iter().zip(cleanup_results.iter()) {
-            if result.success {
-                // Mark lease as expired in storage
-                let mut updated_lease = lease.clone();
-                updated_lease.expire();
-
-                match self.storage.update_lease(updated_lease).await {
-                    Ok(_) => {
-                        successful_cleanups += 1;
-                        self.metrics
-                            .lease_expired(&lease.service_id, &format!("{:?}", lease.object_type));
-                        self.metrics.cleanup_succeeded();
-                        self.metrics
-                            .record_storage_operation("update_lease", &self.config.storage.backend);
-                    }
-                    Err(e) => {
-                        warn!(
-                            lease_id = %lease.lease_id,
-                            error = %e,
-                            "Failed to update lease state after cleanup"
-                        );
-                        self.metrics.record_storage_error(
-                            "update_lease",
-                            &self.config.storage.backend,
-                            "update_after_cleanup_failed",
-                        );
-                    }
-                }
-            } else {
-                failed_cleanups += 1;
-                self.metrics.cleanup_failed();
-
-                if let Some(ref error) = result.error {
-                    warn!(
-                        lease_id = %lease.lease_id,
-                        object_id = %lease.object_id,
-                        error = %error,
-                        "Cleanup operation failed"
-                    );
-                }
+            result = server_handle => {
+                error!("gRPC server exited: {:?}", result);
+                result??;
             }
         }
 
-        // Clean up storage
-        if let Err(e) = self.storage.cleanup().await {
-            warn!(error = %e, "Storage cleanup failed");
-            self.metrics.record_storage_error(
-                "cleanup",
-                &self.config.storage.backend,
-                "storage_cleanup_failed",
-            );
-        } else {
-            self.metrics
-                .record_storage_operation("cleanup", &self.config.storage.backend);
-        }
-
-        info!(
-            successful = successful_cleanups,
-            failed = failed_cleanups,
-            "Cleanup cycle completed"
-        );
-
-        Ok(successful_cleanups)
+        Ok(())
     }
 
-    /// Check if a service has exceeded its lease limit
+    /// Start the cleanup loop in a background task
+    async fn start_cleanup_loop(&self) -> Result<tokio::task::JoinHandle<Result<()>>> {
+        let cleanup_rx = self.cleanup_shutdown_tx.subscribe();
+
+        let cleanup_loop = CleanupLoop::new(
+            self.storage.clone(),
+            self.config.clone(),
+            self.metrics.clone(),
+            cleanup_rx,
+        );
+
+        let handle = tokio::spawn(async move { cleanup_loop.start().await });
+
+        info!("🧹 Cleanup loop started");
+        Ok(handle)
+    }
+
+    /// Start the gRPC server
+    async fn start_grpc_server(
+        &self,
+        addr: std::net::SocketAddr,
+    ) -> Result<tokio::task::JoinHandle<Result<()>>> {
+        let service = DistributedGcServiceServer::new(self.clone());
+
+        let handle = tokio::spawn(async move {
+            Server::builder()
+                .add_service(service)
+                .serve(addr)
+                .await
+                .map_err(|e| GCError::Internal(e.to_string()))
+        });
+
+        info!("🌐 gRPC server started on {}", addr);
+        Ok(handle)
+    }
+
+    /// Gracefully shutdown the service
+    pub async fn shutdown(&self) -> Result<()> {
+        info!("🛑 Initiating graceful shutdown...");
+
+        // Signal cleanup loop to stop
+        if let Err(e) = self.cleanup_shutdown_tx.send(true) {
+            warn!("Failed to send shutdown signal to cleanup loop: {}", e);
+        }
+
+        // Give some time for cleanup operations to complete
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        info!("✅ Graceful shutdown completed");
+        Ok(())
+    }
+
+    /// Check if a service has too many leases
     pub(crate) async fn check_service_lease_limit(&self, service_id: &str) -> Result<()> {
         let filter = LeaseFilter {
             service_id: Some(service_id.to_string()),
@@ -252,18 +129,139 @@ impl GCService {
             ..Default::default()
         };
 
-        let active_count = self.storage.count_leases(filter).await?;
-        self.metrics
-            .record_storage_operation("count_leases", &self.config.storage.backend);
+        let lease_count = self.storage.count_leases(filter).await?;
 
-        if active_count >= self.config.gc.max_leases_per_service {
+        if lease_count >= self.config.gc.max_leases_per_service {
             return Err(GCError::ServiceLeaseLimit {
                 service_id: service_id.to_string(),
-                current: active_count,
+                current: lease_count,
                 max: self.config.gc.max_leases_per_service,
             });
         }
 
         Ok(())
     }
+
+    /// Get service configuration
+    pub(crate) fn get_config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Get metrics instance
+    pub(crate) fn get_metrics(&self) -> &Arc<Metrics> {
+        &self.metrics
+    }
+
+    /// Get storage instance
+    pub(crate) fn get_storage(&self) -> &Arc<dyn Storage> {
+        &self.storage
+    }
+
+    /// Get service uptime
+    pub fn uptime(&self) -> std::time::Duration {
+        self.start_time.elapsed()
+    }
+
+    /// Perform manual cleanup cycle (for testing/admin purposes)
+    pub async fn manual_cleanup(&self) -> Result<CleanupStats> {
+        info!("🔧 Performing manual cleanup cycle...");
+
+        let start_time = Instant::now();
+
+        // Get expired leases
+        let grace_period = self.config.cleanup_grace_period();
+        let expired_leases = self.storage.get_expired_leases(grace_period).await?;
+        let expired_count = expired_leases.len();
+
+        if expired_count == 0 {
+            info!("✅ Manual cleanup: No expired leases found");
+            return Ok(CleanupStats {
+                expired_leases_found: 0,
+                cleanup_attempts: 0,
+                successful_cleanups: 0,
+                failed_cleanups: 0,
+                duration_seconds: start_time.elapsed().as_secs_f64(),
+            });
+        }
+
+        // Create cleanup executor and process leases
+        let cleanup_executor = crate::cleanup::CleanupExecutor::new(
+            std::time::Duration::from_secs(self.config.cleanup.default_timeout_seconds),
+            self.config.cleanup.default_max_retries,
+            std::time::Duration::from_secs(self.config.cleanup.default_retry_delay_seconds),
+        );
+
+        let mut successful_cleanups = 0;
+        let mut failed_cleanups = 0;
+
+        for lease in expired_leases {
+            match cleanup_executor.cleanup_lease(&lease).await {
+                Ok(_) => {
+                    // Remove successfully cleaned lease
+                    if let Err(e) = self.storage.delete_lease(&lease.lease_id).await {
+                        warn!("Failed to remove cleaned lease from storage: {}", e);
+                        failed_cleanups += 1;
+                    } else {
+                        successful_cleanups += 1;
+                    }
+                }
+                Err(e) => {
+                    warn!("Manual cleanup failed for lease {}: {}", lease.lease_id, e);
+                    failed_cleanups += 1;
+                }
+            }
+        }
+
+        let stats = CleanupStats {
+            expired_leases_found: expired_count,
+            cleanup_attempts: expired_count,
+            successful_cleanups,
+            failed_cleanups,
+            duration_seconds: start_time.elapsed().as_secs_f64(),
+        };
+
+        info!(
+            "✅ Manual cleanup completed: {} successful, {} failed in {:.2}s",
+            successful_cleanups, failed_cleanups, stats.duration_seconds
+        );
+
+        Ok(stats)
+    }
+
+    /// Get service health information
+    pub async fn health_info(&self) -> Result<HealthInfo> {
+        let storage_stats = self.storage.get_stats().await?;
+
+        Ok(HealthInfo {
+            uptime_seconds: self.uptime().as_secs(),
+            active_leases: storage_stats.active_leases as u64,
+            expired_leases: storage_stats.expired_leases as u64,
+            total_leases: storage_stats.total_leases as u64,
+            storage_backend: self.config.storage.backend.clone(),
+            cleanup_interval_seconds: self.config.gc.cleanup_interval_seconds,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        })
+    }
+}
+
+/// Statistics from a cleanup operation
+#[derive(Debug, Clone)]
+pub struct CleanupStats {
+    pub expired_leases_found: usize,
+    pub cleanup_attempts: usize,
+    pub successful_cleanups: usize,
+    pub failed_cleanups: usize,
+    pub duration_seconds: f64,
+}
+
+/// Health information for the service
+#[derive(Debug, Clone)]
+pub struct HealthInfo {
+    pub uptime_seconds: u64,
+    pub active_leases: u64,
+    pub expired_leases: u64,
+    pub total_leases: u64,
+    pub storage_backend: String,
+    pub cleanup_interval_seconds: u64,
+    pub version: String,
 }

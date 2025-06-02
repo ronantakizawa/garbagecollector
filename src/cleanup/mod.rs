@@ -1,3 +1,7 @@
+// src/cleanup/mod.rs - Fixed module structure
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
@@ -5,6 +9,7 @@ use tracing::{debug, error, info, warn};
 use crate::error::{GCError, Result};
 use crate::lease::{CleanupConfig, Lease};
 
+/// Enhanced cleanup executor with specialized handlers for different cleanup types
 #[derive(Debug, Clone)]
 pub struct CleanupExecutor {
     default_timeout: Duration,
@@ -95,14 +100,14 @@ impl CleanupExecutor {
     }
 
     async fn try_cleanup(&self, lease: &Lease, config: &CleanupConfig) -> Result<()> {
-        // Try gRPC cleanup first if endpoint is provided
-        if !config.cleanup_endpoint.is_empty() {
-            return self.cleanup_via_grpc(lease, config).await;
-        }
-
         // Try HTTP cleanup if endpoint is provided
         if !config.cleanup_http_endpoint.is_empty() {
             return self.cleanup_via_http(lease, config).await;
+        }
+
+        // Try gRPC cleanup if endpoint is provided
+        if !config.cleanup_endpoint.is_empty() {
+            return self.cleanup_via_grpc(lease, config).await;
         }
 
         // If no cleanup endpoints are provided, just log and return success
@@ -112,6 +117,50 @@ impl CleanupExecutor {
             "No cleanup endpoints configured, marking cleanup as successful"
         );
         Ok(())
+    }
+
+    async fn cleanup_via_http(&self, lease: &Lease, config: &CleanupConfig) -> Result<()> {
+        let cleanup_request = CleanupRequest {
+            lease_id: lease.lease_id.clone(),
+            object_id: lease.object_id.clone(),
+            object_type: format!("{:?}", lease.object_type),
+            service_id: lease.service_id.clone(),
+            metadata: lease.metadata.clone(),
+            payload: config.cleanup_payload.clone(),
+        };
+
+        let response = timeout(
+            self.default_timeout,
+            self.http_client
+                .post(&config.cleanup_http_endpoint)
+                .json(&cleanup_request)
+                .send(),
+        )
+        .await
+        .map_err(|_| GCError::Timeout {
+            timeout_seconds: self.default_timeout.as_secs(),
+        })?
+        .map_err(|e| GCError::Network(e.to_string()))?;
+
+        if response.status().is_success() {
+            debug!(
+                lease_id = %lease.lease_id,
+                endpoint = %config.cleanup_http_endpoint,
+                "HTTP cleanup successful"
+            );
+            Ok(())
+        } else {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read response body".to_string());
+
+            Err(GCError::Cleanup(format!(
+                "HTTP cleanup failed with status {}: {}",
+                status, body
+            )))
+        }
     }
 
     async fn cleanup_via_grpc(&self, lease: &Lease, config: &CleanupConfig) -> Result<()> {
@@ -155,50 +204,6 @@ impl CleanupExecutor {
 
             Err(GCError::Cleanup(format!(
                 "gRPC cleanup failed with status {}: {}",
-                status, body
-            )))
-        }
-    }
-
-    async fn cleanup_via_http(&self, lease: &Lease, config: &CleanupConfig) -> Result<()> {
-        let cleanup_request = CleanupRequest {
-            lease_id: lease.lease_id.clone(),
-            object_id: lease.object_id.clone(),
-            object_type: format!("{:?}", lease.object_type),
-            service_id: lease.service_id.clone(),
-            metadata: lease.metadata.clone(),
-            payload: config.cleanup_payload.clone(),
-        };
-
-        let response = timeout(
-            self.default_timeout,
-            self.http_client
-                .post(&config.cleanup_http_endpoint)
-                .json(&cleanup_request)
-                .send(),
-        )
-        .await
-        .map_err(|_| GCError::Timeout {
-            timeout_seconds: self.default_timeout.as_secs(),
-        })?
-        .map_err(|e| GCError::Network(e.to_string()))?;
-
-        if response.status().is_success() {
-            debug!(
-                lease_id = %lease.lease_id,
-                endpoint = %config.cleanup_http_endpoint,
-                "HTTP cleanup successful"
-            );
-            Ok(())
-        } else {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read response body".to_string());
-
-            Err(GCError::Cleanup(format!(
-                "HTTP cleanup failed with status {}: {}",
                 status, body
             )))
         }
@@ -249,7 +254,7 @@ impl CleanupExecutor {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CleanupRequest {
     pub lease_id: String,
     pub object_id: String,

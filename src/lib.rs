@@ -11,6 +11,9 @@ pub mod storage;
 pub mod dependencies;
 pub mod startup;
 
+// Simulation module for experiments
+pub mod simulation;
+
 // Client module (optional)
 #[cfg(feature = "client")]
 pub mod client;
@@ -32,6 +35,9 @@ pub use storage::{create_storage, Storage};
 
 // Re-export startup
 pub use startup::ApplicationStartup;
+
+// Re-export metrics - FIXED: Export Metrics struct
+pub use metrics::Metrics;
 
 // Re-export client when feature is enabled
 #[cfg(feature = "client")]

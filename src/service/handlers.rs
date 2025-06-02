@@ -395,12 +395,12 @@ impl GCServiceHandlers for GCService {
                 self.metrics.update_lease_counts(&stats);
 
                 Ok(MetricsResponse {
-                    total_leases_created: self.metrics.leases_created_total.get(),
-                    total_leases_renewed: self.metrics.leases_renewed_total.get(),
-                    total_leases_expired: self.metrics.leases_expired_total.get(),
-                    total_leases_released: self.metrics.leases_released_total.get(),
-                    total_cleanup_operations: self.metrics.cleanup_operations_total.get(),
-                    failed_cleanup_operations: self.metrics.cleanup_failures_total.get(),
+                    total_leases_created: self.metrics.get_total_leases_created(),
+                    total_leases_renewed: self.metrics.leases_renewed_total.get() as u64,
+                    total_leases_expired: self.metrics.leases_expired_total.get() as u64,
+                    total_leases_released: self.metrics.get_total_leases_released(),
+                    total_cleanup_operations: self.metrics.cleanup_operations_total.get() as u64,
+                    failed_cleanup_operations: self.metrics.cleanup_failures_total.get() as u64,
                     active_leases: stats.active_leases as u64,
                     leases_by_service: stats
                         .leases_by_service
