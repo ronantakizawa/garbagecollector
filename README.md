@@ -223,7 +223,7 @@ The experiment simulates a realistic distributed system where:
 - Cleanup efficiency: **100.0%**
 
 **💰 Result:**  
-**Assuming it costs $0.02/month:**
+**Assuming it costs $0.02 per GB /month:**
 - **Monthly cost savings:** `$0.4492`  
 - **Annual cost savings:** `$5.39`
 
