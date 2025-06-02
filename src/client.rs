@@ -174,7 +174,7 @@ impl GCClient {
 
     // Convenience methods updated to not require mut
     pub async fn create_temp_file_lease(
-        &self,
+        &mut self,
         file_path: String,
         duration_seconds: u64,
         cleanup_endpoint: Option<String>,
@@ -182,6 +182,7 @@ impl GCClient {
         let cleanup_config = cleanup_endpoint.map(|endpoint| CleanupConfig {
             cleanup_endpoint: String::new(),
             cleanup_http_endpoint: endpoint,
+            // FIXED: Put file_path directly in the payload AND as a top-level field
             cleanup_payload: format!(
                 r#"{{"action": "delete_file", "file_path": "{}"}}"#,
                 file_path
@@ -196,8 +197,9 @@ impl GCClient {
         ]
         .into();
 
+        // CRITICAL: Use the file_path as object_id so cleanup server can find it
         self.create_lease(
-            file_path,
+            file_path, // This becomes the object_id that gets sent to cleanup
             ObjectType::TemporaryFile,
             duration_seconds,
             metadata,

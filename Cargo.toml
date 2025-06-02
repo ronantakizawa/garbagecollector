@@ -119,6 +119,12 @@ name = "garbagetruck-experiment"
 path = "src/bin/experiment/main.rs"
 required-features = ["client"]
 
+# Cleanup server binary - NEW
+[[bin]]
+name = "garbagetruck-cleanup-server"
+path = "src/bin/cleanup-server/main.rs"
+required-features = ["client"]
+
 [[bench]]
 name = "benchmark"
 harness = false
