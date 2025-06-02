@@ -192,257 +192,52 @@ docker exec -it sqlx-test-db psql -U testuser -d postgres -c 'CREATE DATABASE te
 psql $DATABASE_URL -f migrations/001_initial.sql
 ```
 
-## ⚙️ Configuration
+## 💸 Storage Cost Savings Experiment
 
-The service can be configured via environment variables:
+The experiment simulates a realistic distributed system where:
 
-### Server Configuration
-```bash
-export GC_SERVER_HOST=0.0.0.0
-export GC_SERVER_PORT=50051
-```
-
-### Lease Management
-```bash
-export GC_DEFAULT_LEASE_DURATION=300      # 5 minutes
-export GC_MAX_LEASE_DURATION=3600         # 1 hour  
-export GC_MIN_LEASE_DURATION=30           # 30 seconds
-export GC_CLEANUP_INTERVAL=60             # 1 minute
-export GC_CLEANUP_GRACE_PERIOD=30         # 30 seconds
-export GC_MAX_LEASES_PER_SERVICE=10000
-```
-
-### Storage Backend
-```bash
-# Use in-memory storage (default, for development)
-export GC_STORAGE_BACKEND=memory
-
-# Use PostgreSQL (for production)
-export GC_STORAGE_BACKEND=postgres
-export DATABASE_URL="postgresql://user:pass@host:5432/distributed_gc"
-export GC_MAX_DB_CONNECTIONS=10
-```
-
-### Cleanup Configuration
-```bash
-export GC_CLEANUP_TIMEOUT=30
-export GC_CLEANUP_MAX_RETRIES=3
-export GC_CLEANUP_RETRY_DELAY=5
-```
-
-
-### SDK Usage Patterns
-
-#### 1. Temporary File Management
-```rust
-use garbagetruck::GCClient;
-
-async fn process_upload() -> Result> {
-    let mut client = GCClient::new("http://localhost:50051", "upload-service".to_string()).await?;
-    
-    // Create a temporary file lease with automatic cleanup
-    let lease_id = client.create_temp_file_lease(
-        "/tmp/user-upload-123.jpg".to_string(),
-        3600, // Delete after 1 hour
-        Some("http://my-service/cleanup-file".to_string()) // Cleanup endpoint
-    ).await?;
-    
-    // Process the file...
-    process_image("/tmp/user-upload-123.jpg").await?;
-    
-    // File will be automatically deleted after 1 hour, or we can release early
-    client.release_lease(lease_id).await?;
-    
-    Ok(())
-}
-```
-
-#### 2. Database Row Protection
-```rust
-async fn create_user_session() -> Result> {
-    let mut client = GCClient::new("http://localhost:50051", "auth-service".to_string()).await?;
-    
-    // Protect a database row with automatic cleanup
-    let lease_id = client.create_db_row_lease(
-        "user_sessions".to_string(),
-        session_id.to_string(),
-        1800, // 30 minutes
-        Some("http://auth-service/cleanup-session".to_string())
-    ).await?;
-    
-    // Session is now protected - if service crashes, it will be cleaned up automatically
-    
-    // Extend session if user is active
-    client.renew_lease(lease_id.clone(), 1800).await?;
-    
-    // Clean up when user logs out
-    client.release_lease(lease_id).await?;
-    
-    Ok(())
-}
-```
-
-#### 3. Blob Storage Management
-```rust
-async fn upload_temp_file() -> Result> {
-    let mut client = GCClient::new("http://localhost:50051", "storage-service".to_string()).await?;
-    
-    // Upload file to S3
-    let s3_key = upload_to_s3(file_data).await?;
-    
-    // Create lease for the uploaded blob
-    let lease_id = client.create_blob_lease(
-        "temp-uploads".to_string(),
-        s3_key.clone(),
-        7200, // 2 hours
-        Some("http://storage-service/delete-s3-object".to_string())
-    ).await?;
-    
-    // Process the uploaded file...
-    let result = process_uploaded_file(&s3_key).await?;
-    
-    if result.should_keep {
-        // Move to permanent storage and release lease
-        move_to_permanent_storage(&s3_key).await?;
-        client.release_lease(lease_id).await?;
-    } else {
-        // Just release - file will be cleaned up automatically
-        client.release_lease(lease_id).await?;
-    }
-    
-    Ok(())
-}
-```
-
-#### 4. WebSocket Session Management
-```rust
-async fn handle_websocket_connection(session_id: String, user_id: String) -> Result> {
-    let mut client = GCClient::new("http://localhost:50051", "websocket-service".to_string()).await?;
-    
-    // Create session lease with auto-cleanup on disconnect
-    let lease_id = client.create_session_lease(
-        session_id.clone(),
-        user_id.clone(),
-        300, // 5 minute timeout
-        Some("http://websocket-service/force-disconnect".to_string())
-    ).await?;
-    
-    // Keep renewing lease while connection is active
-    loop {
-        tokio::select! {
-            // Renew lease on each message
-            _ = receive_message() => {
-                client.renew_lease(lease_id.clone(), 300).await?;
-            }
-            // Or handle disconnect
-            _ = connection_closed() => {
-                client.release_lease(lease_id).await?;
-                break;
-            }
-        }
-    }
-    
-    Ok(())
-}
-```
-
-## 📂 Source File Overview
-
-- **src/bin/main.rs** – Application entry point and minimal startup coordination  
-- **src/lib.rs** – Crate root with module declarations and public API re-exports  
-- **src/startup.rs** – Application startup orchestration and component initialization  
-- **src/dependencies.rs** – External dependency checking and health validation  
-- **src/monitoring.rs** – System monitoring tasks and performance tracking  
-- **src/config.rs** – Configuration loading, validation, and environment variable parsing  
-- **src/error.rs** – Error types and `Result` definitions for the entire crate  
-- **src/lease.rs** – Core lease data structures and business logic  
-- **src/cleanup.rs** – Cleanup executor for expired lease processing  
-- **src/client.rs** – gRPC client SDK and convenience methods for service interaction  
-- **src/shutdown.rs** – Graceful shutdown coordination and task management  
-
-### 📦 Service Module (`src/service/`)
-- **mod.rs** – Core service struct, business logic, and cleanup loop management  
-- **handlers.rs** – gRPC method implementations and request/response handling  
-- **validation.rs** – Request validation logic and input sanitization  
-
-### 💾 Storage Module (`src/storage/`)
-- **mod.rs** – Storage trait definitions, factory function, and shared types  
-- **memory.rs** – In-memory storage implementation using DashMap for development/testing  
-- **postgres.rs** – PostgreSQL storage implementation with connection pooling for production  
-
-### 📊 Metrics Module (`src/metrics/`)
-- **mod.rs** – Core Prometheus metrics definitions and main `Metrics` struct  
-- **alerting.rs** – Alert management system with thresholds and notification logic  
-- **interceptors.rs** – gRPC interceptors for automatic request/response metrics collection  
-- **monitoring.rs** – Background monitoring tasks and extended metric implementations 
-
-## 🧪 Test File Structure Overview
-
-### 📂 Main Test Directory (`tests/`)
-
-- **`lib.rs`** – Main test library entry point and module coordination  
-- **`comprehensive_test.sh`** – Shell script for end-to-end testing scenarios  
-- **`shutdown.rs`** – Legacy shutdown tests (consider moving to integration structure)  
+- Jobs create temporary files (logs, uploads, processing artifacts)  
+- System failures occur at configurable rates (crashes, network issues)  
+- Files become orphaned without proper cleanup mechanisms  
+- **GarbageTruck** automatically recovers orphaned resources via lease expiration  
 
 ---
 
-### 🔧 Test Helpers (`tests/helpers/`)
+### 📊 Results  
+**Catastrophic Failure Scenario (100% job crash rate)**
 
-- **`mod.rs`** – Common test utilities, port management, and service availability checks  
-- **`mock_server.rs`** – `MockCleanupServer` implementation for simulating cleanup endpoints  
-- **`test_data.rs`** – Test lease data generators and factory methods for consistent test objects  
-- **`assertions.rs`** – Custom domain-specific assertions for lease validation and cleanup verification  
+#### 🚫 WITHOUT GARBAGETRUCK:
+- Files created: **200**  
+- Files cleaned: **0**  
+- Files orphaned: **200 (100.0%)**  
+- Storage used: **20000.00 MB (19.53 GB)**  
+- Monthly cost: **$0.4492**  
+- Cleanup efficiency: **0.0%**
 
----
+#### ✅ WITH GARBAGETRUCK:
+- Files created: **200**  
+- Files cleaned: **200**  
+- Files orphaned: **0 (0.0%)**  
+- Storage used: **0.00 MB (0.00 GB)**  
+- Monthly cost: **$0.0000**  
+- Cleanup efficiency: **100.0%**
 
-### 🏗️ Integration Tests (`tests/integration/`)
-
-- **`mod.rs`** – Integration test harness, `TestHarness` struct, and common test coordination utilities  
-
----
-
-### 💾 Storage Integration Tests (`tests/integration/storage/`)
-
-- **`mod.rs`** – Storage test utilities, common interface tests, and backend factory testing  
-- **`memory.rs`** – In-memory storage implementation tests (CRUD, filtering, statistics, cleanup)  
-- **`postgres.rs`** – PostgreSQL storage tests (advanced queries, concurrent operations, performance)  
-- **`factory.rs`** – Storage factory pattern tests and backend selection validation  
-
----
-
-### 🌐 gRPC Integration Tests (`tests/integration/grpc/`)
-
-- **`mod.rs`** – gRPC test utilities, request builders, and common gRPC test patterns  
-- **`basic.rs`** – Basic gRPC operations (health check, CRUD, lease lifecycle management)  
-- **`auth.rs`** – Authorization and security tests (unauthorized access, lease ownership validation)  
-- **`concurrent.rs`** – Concurrency and stress tests (parallel operations, race conditions, load testing)  
-- **`cleanup.rs`** – Cleanup integration tests (automatic cleanup, retry logic, cleanup server communication)  
+**💰 Result:**  
+**Monthly cost savings:** `$0.4492`  
+**Annual cost savings:** `$5.39`
 
 ---
 
-### 🔄 Service Integration Tests (`tests/integration/service/`)
+### 📈 Scale Projections
 
-- **`mod.rs`** – Service-level test utilities, test service creation, and shutdown coordination helpers  
-- **`shutdown.rs`** – Graceful shutdown coordination tests (priority ordering, timeout handling, signal management)  
-- **`lifecycle.rs`** – Service lifecycle management tests (startup/shutdown cycles, component integration, restart scenarios)  
-
----
-
-### 🔗 Cross-Backend Tests (`tests/integration/cross_backend/`)
-
-- **`mod.rs`** – Cross-backend consistency tests and storage behavior validation across different backends  
-- **`consistency.rs`** – Data consistency verification tests ensuring identical behavior between memory and PostgreSQL storage  
+| Scale        | Jobs   | Storage | Monthly Cost Without GT | Monthly Cost With GT | Annual Savings |
+|--------------|--------|---------|--------------------------|------------------------|----------------|
+| Development  | 200    | 20GB    | $0.45                   | $0.045                | $4.86          |
+| Production   | 2,000  | 200GB   | $4.50                   | $0.45                 | $48.60         |
+| Enterprise   | 20,000 | 2TB     | $45.00                  | $4.50                 | $486.00        |
+| Hyperscale   | 200,000| 20TB    | $450.00                 | $45.00                | $4,860.00      |
 
 ---
-
-### 🗄️ Database-Specific Tests (`tests/integration/database/`)  
-*Note: These tests are conditionally compiled with the `postgres` feature*
-
-- **`mod.rs`** – Database test utilities and PostgreSQL-specific testing infrastructure  
-- **`schema.rs`** – Database schema integrity tests (table structure, constraints, indexes)  
-- **`triggers.rs`** – Database trigger functionality tests (automatic statistics updates, state transitions)  
-- **`functions.rs`** – Database function tests (stored procedures, statistics calculations, cleanup operations)  
-- **`performance.rs`** – Database performance and indexing tests (query optimization, concurrent access)  
 
 
 ## 📄 License
