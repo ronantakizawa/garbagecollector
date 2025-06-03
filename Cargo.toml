@@ -95,7 +95,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 tonic-build = "0.12"
 
 [features]
-default = ["client"]
+default = ["client", "server"]  
 client = ["clap"]
 server = []
 postgres = ["sqlx"]

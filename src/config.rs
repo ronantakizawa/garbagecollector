@@ -112,12 +112,12 @@ impl Default for Config {
                 port: 50051,
             },
             gc: GCConfig {
-                default_lease_duration_seconds: 300, // 5 minutes
-                max_lease_duration_seconds: 3600,    // 1 hour
-                min_lease_duration_seconds: 30,      // 30 seconds
-                cleanup_interval_seconds: 60,        // 1 minute
-                cleanup_grace_period_seconds: 30,    // 30 seconds
-                max_leases_per_service: 10000,
+                default_lease_duration_seconds: 300, 
+                max_lease_duration_seconds: 3600,    
+                min_lease_duration_seconds: 30,     
+                cleanup_interval_seconds: 60,        
+                cleanup_grace_period_seconds: 30,   
+                max_leases_per_service: 50000,
                 max_concurrent_cleanups: 10,
             },
             storage: StorageConfig {

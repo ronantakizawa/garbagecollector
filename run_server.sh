@@ -52,7 +52,7 @@ fi
 
 # Build the server
 echo -e "${BLUE}🔨 Building GarbageTruck server...${NC}"
-if ! cargo build --release --bin garbagetruck-server --features server; then
+if ! cargo build --release --bin garbagetruck-server; then
     echo -e "${RED}❌ Build failed${NC}"
     exit 1
 fi
@@ -71,4 +71,4 @@ echo -e "${YELLOW}💡 Use Ctrl+C to stop the server${NC}"
 echo ""
 
 # Run the server
-cargo run --release --bin garbagetruck-server --features server
+cargo run --release --bin garbagetruck-server

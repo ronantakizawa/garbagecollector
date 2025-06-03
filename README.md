@@ -95,7 +95,7 @@ cargo build --release
 
 2. **Start the service locally**
 ```bash
-cargo run --bin garbagetruck-server
+cargo run --bin garbagetruck-server 
 ```
 
 3. **Start the service via Docker-Compose (Includes PostgreSQL, Prometheus, and Grafana Support)**
