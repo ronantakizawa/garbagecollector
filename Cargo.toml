@@ -60,9 +60,6 @@ url = "2.4"
 # Configuration
 config = "0.14"
 
-# Database (optional)
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"], optional = true }
-
 # Metrics
 prometheus = "0.13"
 
@@ -95,11 +92,11 @@ criterion = { version = "0.5", features = ["html_reports"] }
 tonic-build = "0.12"
 
 [features]
-default = ["client", "server"]  
+default = ["client","server"]
 client = ["clap"]
 server = []
-postgres = ["sqlx"]
-full = ["client", "server", "postgres"]
+# Remove postgres feature entirely
+full = ["client", "server"]
 
 # Server binary
 [[bin]]
@@ -119,7 +116,7 @@ name = "garbagetruck-experiment"
 path = "src/bin/experiment/main.rs"
 required-features = ["client"]
 
-# Cleanup server binary - NEW
+# Cleanup server binary
 [[bin]]
 name = "garbagetruck-cleanup-server"
 path = "src/bin/cleanup-server/main.rs"

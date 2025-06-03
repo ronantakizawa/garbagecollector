@@ -231,12 +231,12 @@ The experiment simulates a realistic distributed system where:
 
 ### 📈 Scale Projections
 
-| Scale        | Jobs   | Storage | Monthly Cost Without GT | Monthly Cost With GT | Annual Savings |
-|--------------|--------|---------|--------------------------|------------------------|----------------|
-| Development  | 200    | 20GB    | $0.45                   | $0.045                | $4.86          |
-| Production   | 2,000  | 200GB   | $4.50                   | $0.45                 | $48.60         |
-| Enterprise   | 20,000 | 2TB     | $45.00                  | $4.50                 | $486.00        |
-| Hyperscale   | 200,000| 20TB    | $450.00                 | $45.00                | $4,860.00      |
+Scale        | Jobs    | Orphaned Objects | Storage Saved | Annual Savings
+-------------|---------|------------------|---------------|---------------
+Development  | 200     | 80               | 800MB         | $1.46
+Production   | 2,000   | 800              | 8GB           | $14.6
+Enterprise   | 20,000  | 8,000            | 80GB          | $146
+Hyperscale   | 200,000 | 80,000           | 800GB         | $1,460
 
 ---
 

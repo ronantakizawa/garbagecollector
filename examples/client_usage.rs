@@ -1,7 +1,6 @@
-// examples/client_usage.rs - Basic client usage example
+// examples/client_usage.rs - Fixed version
 
-use garbagetruck::{GCClient, ObjectType};
-use std::collections::HashMap;
+use garbagetruck::GCClient;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

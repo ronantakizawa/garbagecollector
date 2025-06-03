@@ -1,4 +1,4 @@
-// src/config.rs - Enhanced with validation metrics and detailed error reporting
+// src/config.rs - Simplified configuration without PostgreSQL
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -46,14 +46,8 @@ pub struct GCConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
-    /// Storage backend type: "memory" or "postgres"
+    /// Storage backend type: only "memory" is supported
     pub backend: String,
-
-    /// Database connection string (if using postgres)
-    pub database_url: Option<String>,
-
-    /// Maximum number of database connections
-    pub max_connections: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,18 +106,16 @@ impl Default for Config {
                 port: 50051,
             },
             gc: GCConfig {
-                default_lease_duration_seconds: 300, 
-                max_lease_duration_seconds: 3600,    
-                min_lease_duration_seconds: 30,     
-                cleanup_interval_seconds: 60,        
-                cleanup_grace_period_seconds: 30,   
-                max_leases_per_service: 50000,
+                default_lease_duration_seconds: 300, // 5 minutes
+                max_lease_duration_seconds: 3600,    // 1 hour
+                min_lease_duration_seconds: 30,      // 30 seconds
+                cleanup_interval_seconds: 60,        // 1 minute
+                cleanup_grace_period_seconds: 30,    // 30 seconds
+                max_leases_per_service: 10000,
                 max_concurrent_cleanups: 10,
             },
             storage: StorageConfig {
                 backend: "memory".to_string(),
-                database_url: None,
-                max_connections: Some(10),
             },
             cleanup: CleanupConfig {
                 default_timeout_seconds: 30,
@@ -140,7 +132,7 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load configuration from environment variables with detailed error reporting
+    /// Load configuration from environment variables
     pub fn from_env() -> Result<Self> {
         let start_time = std::time::Instant::now();
         let mut config = Config::default();
@@ -254,29 +246,16 @@ impl Config {
             }
         }
 
-        // Storage configuration
+        // Storage configuration - only memory backend supported
         if let Ok(backend) = std::env::var("GC_STORAGE_BACKEND") {
-            debug!("Found GC_STORAGE_BACKEND: {}", backend);
-            config.storage.backend = backend;
-        }
-
-        if let Ok(db_url) = std::env::var("DATABASE_URL") {
-            debug!("Found DATABASE_URL (length: {})", db_url.len());
-            config.storage.database_url = Some(db_url);
-        }
-
-        if let Ok(max_conn) = std::env::var("GC_MAX_DB_CONNECTIONS") {
-            match max_conn.parse() {
-                Ok(m) => {
-                    debug!("Found GC_MAX_DB_CONNECTIONS: {}", m);
-                    config.storage.max_connections = Some(m);
-                }
-                Err(e) => {
-                    parse_errors.push(format!(
-                        "Invalid GC_MAX_DB_CONNECTIONS '{}': {}",
-                        max_conn, e
-                    ));
-                }
+            if backend != "memory" {
+                parse_errors.push(format!(
+                    "Unsupported storage backend '{}': only 'memory' is supported",
+                    backend
+                ));
+            } else {
+                debug!("Found GC_STORAGE_BACKEND: {}", backend);
+                config.storage.backend = backend;
             }
         }
 
@@ -441,28 +420,13 @@ impl Config {
         }
 
         // Validate storage configuration
-        if self.storage.backend == "postgres" && self.storage.database_url.is_none() {
+        if self.storage.backend != "memory" {
             errors.push(ValidationError {
-                field: "storage.database_url".to_string(),
-                error_type: "missing_required".to_string(),
-                message: "Database URL is required when using postgres backend".to_string(),
-                suggested_fix: Some("Set DATABASE_URL environment variable".to_string()),
+                field: "storage.backend".to_string(),
+                error_type: "unsupported_backend".to_string(),
+                message: format!("Unsupported storage backend: {}", self.storage.backend),
+                suggested_fix: Some("Set storage backend to 'memory'".to_string()),
             });
-        }
-
-        // Validate database URL format if provided
-        if let Some(ref db_url) = self.storage.database_url {
-            if !db_url.starts_with("postgresql://") && !db_url.starts_with("postgres://") {
-                errors.push(ValidationError {
-                    field: "storage.database_url".to_string(),
-                    error_type: "invalid_format".to_string(),
-                    message: "Database URL must start with postgresql:// or postgres://"
-                        .to_string(),
-                    suggested_fix: Some(
-                        "Use format: postgresql://user:pass@host:port/dbname".to_string(),
-                    ),
-                });
-            }
         }
 
         // Validate server configuration
@@ -515,18 +479,6 @@ impl Config {
             });
         }
 
-        if let Some(max_conn) = self.storage.max_connections {
-            if max_conn > 100 {
-                warnings.push(ValidationWarning {
-                    field: "storage.max_connections".to_string(),
-                    message: "High connection count may overwhelm database".to_string(),
-                    recommendation: Some(
-                        "Ensure database can handle the connection load".to_string(),
-                    ),
-                });
-            }
-        }
-
         // Validate cleanup timeouts
         if self.cleanup.default_timeout_seconds > 300 {
             warnings.push(ValidationWarning {
@@ -553,7 +505,6 @@ impl Config {
         ConfigSummary {
             server_endpoint: format!("{}:{}", self.server.host, self.server.port),
             storage_backend: self.storage.backend.clone(),
-            has_database_url: self.storage.database_url.is_some(),
             default_lease_duration: self.gc.default_lease_duration_seconds,
             cleanup_interval: self.gc.cleanup_interval_seconds,
             max_leases_per_service: self.gc.max_leases_per_service,
@@ -593,7 +544,6 @@ impl Config {
 pub struct ConfigSummary {
     pub server_endpoint: String,
     pub storage_backend: String,
-    pub has_database_url: bool,
     pub default_lease_duration: u64,
     pub cleanup_interval: u64,
     pub max_leases_per_service: usize,
@@ -629,17 +579,16 @@ mod tests {
     }
 
     #[test]
-    fn test_postgres_without_url() {
+    fn test_unsupported_backend() {
         let mut config = Config::default();
         config.storage.backend = "postgres".to_string();
-        config.storage.database_url = None;
 
         let result = config.validate_detailed();
         assert!(!result.success);
         assert!(result
             .errors
             .iter()
-            .any(|e| e.error_type == "missing_required"));
+            .any(|e| e.error_type == "unsupported_backend"));
     }
 
     #[test]

@@ -1,129 +1,205 @@
-// tests/integration/storage/factory.rs - Storage factory tests
+// tests/integration/storage/factory.rs - Complete fixed version
 
-use anyhow::Result;
-use garbagetruck::config::Config;
-use garbagetruck::storage::create_storage;
-
-use crate::helpers::test_data::create_test_lease_data; // Remove skip_if_no_env for now
-use crate::integration::print_test_header;
+use garbagetruck::{
+    config::Config,
+    error::GCError,
+    storage::{create_storage, Storage},
+};
 
 #[tokio::test]
-async fn test_storage_factory() -> Result<()> {
-    print_test_header("storage factory", "🏭");
-
-    // Test memory storage creation
+async fn test_memory_storage_creation() {
+    println!("🧠 Testing memory storage creation...");
+    
     let mut config = Config::default();
     config.storage.backend = "memory".to_string();
-
-    let memory_storage = create_storage(&config).await?;
-
-    // Test basic operation
-    let test_lease = create_test_lease_data("factory-test", "factory-service", 300);
-    memory_storage.create_lease(test_lease.clone()).await?;
-
-    let retrieved = memory_storage.get_lease(&test_lease.lease_id).await?;
-    assert!(
-        retrieved.is_some(),
-        "Should create and retrieve lease via factory"
-    );
-
-    println!("✅ Memory storage factory works");
-
-    // Test PostgreSQL storage creation (if available)
-    #[cfg(feature = "postgres")]
-    {
-        if std::env::var("DATABASE_URL").is_ok() {
-            let database_url = std::env::var("DATABASE_URL").unwrap();
-            config.storage.backend = "postgres".to_string();
-            config.storage.database_url = Some(database_url);
-            config.storage.max_connections = Some(5);
-
-            let postgres_storage = create_storage(&config).await?;
-
-            let pg_test_lease =
-                create_test_lease_data("pg-factory-test", "pg-factory-service", 300);
-            postgres_storage.create_lease(pg_test_lease.clone()).await?;
-
-            let pg_retrieved = postgres_storage.get_lease(&pg_test_lease.lease_id).await?;
-            assert!(
-                pg_retrieved.is_some(),
-                "Should create and retrieve lease via PostgreSQL factory"
-            );
-
-            // Clean up
-            let _ = postgres_storage.delete_lease(&pg_test_lease.lease_id).await;
-
-            println!("✅ PostgreSQL storage factory works");
-        } else {
-            println!("⚠️  Skipping PostgreSQL factory test - DATABASE_URL not set");
-        }
-    }
-
-    #[cfg(not(feature = "postgres"))]
-    {
-        println!("⚠️  Skipping PostgreSQL factory test - postgres feature not enabled");
-    }
-
-    Ok(())
+    
+    let storage = create_storage(&config).await.unwrap();
+    
+    // Test that we can use the storage
+    let healthy = storage.health_check().await.unwrap();
+    assert!(healthy, "Memory storage should be healthy");
+    
+    // Test that it's actually memory storage by checking stats
+    let stats = storage.get_stats().await.unwrap();
+    assert_eq!(stats.total_leases, 0, "New memory storage should have no leases");
 }
 
 #[tokio::test]
-async fn test_unknown_storage_backend() -> Result<()> {
-    print_test_header("unknown storage backend handling", "❌");
+async fn test_default_config_creates_memory_storage() {
+    println!("📋 Testing default config creates memory storage...");
+    
+    let config = Config::default();
+    assert_eq!(config.storage.backend, "memory");
+    
+    let storage = create_storage(&config).await.unwrap();
+    let healthy = storage.health_check().await.unwrap();
+    assert!(healthy, "Default storage should be healthy");
+}
 
+#[tokio::test]
+async fn test_storage_factory_interface() {
+    println!("🏭 Testing storage factory interface...");
+    
+    let config = Config::default();
+    
+    // Test that create_storage returns the correct type
+    let storage: std::sync::Arc<dyn Storage> = create_storage(&config).await.unwrap();
+    
+    // Test basic operations work through the trait
+    let stats = storage.get_stats().await.unwrap();
+    assert_eq!(stats.total_leases, 0);
+    
+    let healthy = storage.health_check().await.unwrap();
+    assert!(healthy);
+}
+
+#[tokio::test]
+async fn test_unknown_storage_backend() {
+    println!("❌ Testing unknown storage backend handling...");
+    
     let mut config = Config::default();
     config.storage.backend = "unknown-backend".to_string();
-
+    
     let result = create_storage(&config).await;
-    assert!(result.is_err(), "Should fail for unknown backend");
-
-    // Check the error message instead of unwrapping
+    
     match result {
-        Err(e) => {
+        Err(GCError::Configuration(msg)) => {
             assert!(
-                e.to_string().contains("Unknown storage backend"),
-                "Error should mention unknown backend: {}",
-                e
+                msg.contains("Unsupported storage backend"),
+                "Error should mention unsupported backend: {}",
+                msg
+            );
+            assert!(
+                msg.contains("unknown-backend"),
+                "Error should mention the specific backend: {}",
+                msg
             );
         }
-        Ok(_) => panic!("Expected error for unknown backend"),
+        _ => panic!("Expected configuration error for unknown backend"),
     }
-
-    println!("✅ Unknown storage backend properly rejected");
-    Ok(())
 }
 
 #[tokio::test]
-async fn test_postgres_without_url() -> Result<()> {
-    print_test_header("postgres backend without URL", "🔧");
-
+async fn test_postgres_backend_not_supported() {
+    println!("🔧 Testing postgres backend not supported...");
+    
     let mut config = Config::default();
     config.storage.backend = "postgres".to_string();
-    config.storage.database_url = None; // Missing URL
-
+    
     let result = create_storage(&config).await;
-    assert!(
-        result.is_err(),
-        "Should fail when postgres backend selected but no URL provided"
-    );
-
-    // Check the error message
+    
     match result {
-        Err(e) => {
-            let error_msg = e.to_string();
-            // Accept either error message depending on whether postgres feature is enabled
-            let valid_error = error_msg.contains("Database URL required")
-                || error_msg.contains("required for postgres")
-                || error_msg.contains("Postgres support not compiled in");
+        Err(GCError::Configuration(msg)) => {
             assert!(
-                valid_error,
-                "Error should mention missing URL or feature not compiled: {}",
-                error_msg
+                msg.contains("Unsupported storage backend"),
+                "Error should mention unsupported backend: {}",
+                msg
+            );
+            assert!(
+                msg.contains("postgres"),
+                "Error should mention postgres: {}",
+                msg
+            );
+            assert!(
+                msg.contains("Only 'memory' is supported"),
+                "Error should mention only memory is supported: {}",
+                msg
             );
         }
-        Ok(_) => panic!("Expected error for missing postgres URL"),
+        _ => panic!("Expected configuration error for postgres backend"),
     }
+}
 
-    println!("✅ PostgreSQL backend properly requires URL (or feature)");
-    Ok(())
+#[tokio::test]
+async fn test_case_sensitive_backend_names() {
+    println!("🔤 Testing case sensitive backend names...");
+    
+    // Test uppercase
+    let mut config = Config::default();
+    config.storage.backend = "MEMORY".to_string();
+    
+    let result = create_storage(&config).await;
+    assert!(result.is_err(), "Backend names should be case sensitive");
+    
+    // Test mixed case
+    config.storage.backend = "Memory".to_string();
+    let result = create_storage(&config).await;
+    assert!(result.is_err(), "Backend names should be case sensitive");
+    
+    // Test correct case
+    config.storage.backend = "memory".to_string();
+    let result = create_storage(&config).await;
+    assert!(result.is_ok(), "Correct case should work");
+}
+
+#[tokio::test]
+async fn test_empty_backend_name() {
+    println!("📭 Testing empty backend name...");
+    
+    let mut config = Config::default();
+    config.storage.backend = "".to_string();
+    
+    let result = create_storage(&config).await;
+    
+    match result {
+        Err(GCError::Configuration(msg)) => {
+            assert!(
+                msg.contains("Unsupported storage backend"),
+                "Error should mention unsupported backend: {}",
+                msg
+            );
+        }
+        _ => panic!("Expected configuration error for empty backend name"),
+    }
+}
+
+#[tokio::test]
+async fn test_storage_creation_with_custom_config() {
+    println!("⚙️ Testing storage creation with custom config...");
+    
+    let mut config = Config::default();
+    config.storage.backend = "memory".to_string();
+    config.gc.default_lease_duration_seconds = 600;
+    config.gc.max_leases_per_service = 5000;
+    
+    // Storage creation should succeed regardless of other config settings
+    let storage = create_storage(&config).await.unwrap();
+    let healthy = storage.health_check().await.unwrap();
+    assert!(healthy, "Storage should be healthy with custom config");
+}
+
+#[tokio::test]
+async fn test_multiple_storage_instances() {
+    println!("🔢 Testing multiple storage instances...");
+    
+    let config = Config::default();
+    
+    // Create multiple storage instances
+    let storage1 = create_storage(&config).await.unwrap();
+    let storage2 = create_storage(&config).await.unwrap();
+    
+    // They should be independent
+    let stats1 = storage1.get_stats().await.unwrap();
+    let stats2 = storage2.get_stats().await.unwrap();
+    
+    assert_eq!(stats1.total_leases, 0);
+    assert_eq!(stats2.total_leases, 0);
+    
+    // Creating a lease in one shouldn't affect the other
+    let lease = garbagetruck::lease::Lease::new(
+        "test-object".to_string(),
+        garbagetruck::lease::ObjectType::TemporaryFile,
+        "test-service".to_string(),
+        std::time::Duration::from_secs(300),
+        std::collections::HashMap::new(),
+        None,
+    );
+    
+    storage1.create_lease(lease).await.unwrap();
+    
+    let stats1_after = storage1.get_stats().await.unwrap();
+    let stats2_after = storage2.get_stats().await.unwrap();
+    
+    assert_eq!(stats1_after.total_leases, 1);
+    assert_eq!(stats2_after.total_leases, 0);
 }

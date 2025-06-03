@@ -1,5 +1,3 @@
-// src/dependencies.rs - Simplified external dependency checking
-
 use anyhow::Result;
 use std::time::Instant;
 use tracing::{error, info, warn};
@@ -48,68 +46,11 @@ impl<'a> DependencyChecker<'a> {
                 );
                 Ok(())
             }
-            "postgres" => {
-                #[cfg(feature = "postgres")]
-                {
-                    if let Some(ref database_url) = self.config.storage.database_url {
-                        match self.check_postgres_connection(database_url).await {
-                            Ok(_) => {
-                                let duration = storage_check_start.elapsed();
-                                info!(
-                                    "✅ PostgreSQL storage backend ready in {:.3}s",
-                                    duration.as_secs_f64()
-                                );
-                                Ok(())
-                            }
-                            Err(e) => {
-                                let duration = storage_check_start.elapsed();
-                                error!(
-                                    "❌ PostgreSQL connection failed after {:.3}s: {}",
-                                    duration.as_secs_f64(),
-                                    e
-                                );
-                                Err(anyhow::anyhow!("PostgreSQL connection failed: {}", e))
-                            }
-                        }
-                    } else {
-                        error!("❌ PostgreSQL backend selected but no database URL provided");
-                        Err(anyhow::anyhow!("PostgreSQL database URL not configured"))
-                    }
-                }
-                #[cfg(not(feature = "postgres"))]
-                {
-                    error!("❌ PostgreSQL backend selected but postgres feature not enabled");
-                    Err(anyhow::anyhow!("PostgreSQL support not compiled in"))
-                }
-            }
             backend => {
-                error!("❌ Unknown storage backend: {}", backend);
-                Err(anyhow::anyhow!("Unknown storage backend: {}", backend))
+                error!("❌ Unsupported storage backend: {}", backend);
+                Err(anyhow::anyhow!("Unsupported storage backend: {}", backend))
             }
         }
-    }
-
-    /// Check PostgreSQL connection
-    #[cfg(feature = "postgres")]
-    async fn check_postgres_connection(&self, database_url: &str) -> Result<()> {
-        use sqlx::PgPool;
-
-        info!("🐘 Testing PostgreSQL connection...");
-
-        let pool = PgPool::connect(database_url)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to PostgreSQL: {}", e))?;
-
-        // Test with a simple query
-        sqlx::query("SELECT 1")
-            .fetch_one(&pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to execute test query: {}", e))?;
-
-        pool.close().await;
-        info!("✅ PostgreSQL connection test successful");
-
-        Ok(())
     }
 
     /// Check if metrics port is available

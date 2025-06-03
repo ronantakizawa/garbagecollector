@@ -11,7 +11,6 @@ use tracing::{info, warn, error, debug};
 use uuid::Uuid;
 
 use crate::client::GCClient;
-use crate::lease::ObjectType;
 
 /// File simulation configuration
 #[derive(Debug, Clone)]

@@ -1,57 +1,67 @@
-// src/storage/memory.rs - In-memory storage implementation
+// src/storage/memory.rs - Fixed implementation matching the Storage trait
 
 use async_trait::async_trait;
+use chrono::Utc;
 use dashmap::DashMap;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tracing::debug;
 
 use crate::error::{GCError, Result};
-use crate::lease::{Lease, LeaseFilter, LeaseState, LeaseStats};
+use crate::lease::{Lease, LeaseFilter, LeaseStats, LeaseState, ObjectType};
 
-use super::{DetailedStorageStats, ExtendedStorage, Storage, StorageInfo};
+use super::Storage;
 
-/// In-memory storage implementation using DashMap for thread-safe operations
-#[derive(Clone)]
+/// In-memory storage implementation using DashMap for thread-safe access
 pub struct MemoryStorage {
-    leases: Arc<DashMap<String, Lease>>,
-    stats: Arc<DashMap<String, u64>>, // For tracking operation counts
+    leases: DashMap<String, Lease>,
+    stats: Arc<MemoryStorageStats>,
+}
+
+#[derive(Debug, Default)]
+struct MemoryStorageStats {
+    operations_total: AtomicU64,
+    get_operations: AtomicU64,
+    list_operations: AtomicU64,
+    create_operations: AtomicU64,
+    update_operations: AtomicU64,
+    delete_operations: AtomicU64,
+}
+
+impl MemoryStorageStats {
+    fn increment(&self, operation: &str) {
+        self.operations_total.fetch_add(1, Ordering::Relaxed);
+        match operation {
+            "get" => self.get_operations.fetch_add(1, Ordering::Relaxed),
+            "list" => self.list_operations.fetch_add(1, Ordering::Relaxed),
+            "create" => self.create_operations.fetch_add(1, Ordering::Relaxed),
+            "update" => self.update_operations.fetch_add(1, Ordering::Relaxed),
+            "delete" => self.delete_operations.fetch_add(1, Ordering::Relaxed),
+            _ => 0,
+        };
+    }
 }
 
 impl MemoryStorage {
     /// Create a new in-memory storage instance
     pub fn new() -> Self {
         Self {
-            leases: Arc::new(DashMap::new()),
-            stats: Arc::new(DashMap::new()),
+            leases: DashMap::new(),
+            stats: Arc::new(MemoryStorageStats::default()),
         }
     }
 
-    /// Get the current number of stored leases
-    pub fn len(&self) -> usize {
-        self.leases.len()
-    }
-
-    /// Check if storage is empty
-    pub fn is_empty(&self) -> bool {
-        self.leases.is_empty()
-    }
-
-    /// Clear all leases (useful for testing)
-    #[cfg(test)]
-    pub fn clear(&self) {
-        self.leases.clear();
-        self.stats.clear();
-    }
-
-    /// Increment operation counter
-    fn increment_stat(&self, operation: &str) {
-        let mut counter = self.stats.entry(operation.to_string()).or_insert(0);
-        *counter += 1;
-    }
-
-    /// Get operation count
-    fn get_stat(&self, operation: &str) -> u64 {
-        self.stats.get(operation).map(|v| *v).unwrap_or(0)
+    /// Get internal statistics for monitoring
+    pub fn get_internal_stats(&self) -> HashMap<String, u64> {
+        let mut stats = HashMap::new();
+        stats.insert("total_leases".to_string(), self.leases.len() as u64);
+        stats.insert("operations_total".to_string(), self.stats.operations_total.load(Ordering::Relaxed));
+        stats.insert("get_operations".to_string(), self.stats.get_operations.load(Ordering::Relaxed));
+        stats.insert("list_operations".to_string(), self.stats.list_operations.load(Ordering::Relaxed));
+        stats.insert("create_operations".to_string(), self.stats.create_operations.load(Ordering::Relaxed));
+        stats.insert("update_operations".to_string(), self.stats.update_operations.load(Ordering::Relaxed));
+        stats.insert("delete_operations".to_string(), self.stats.delete_operations.load(Ordering::Relaxed));
+        stats
     }
 }
 
@@ -64,124 +74,146 @@ impl Default for MemoryStorage {
 #[async_trait]
 impl Storage for MemoryStorage {
     async fn create_lease(&self, lease: Lease) -> Result<()> {
-        let lease_id = lease.lease_id.clone();
-
-        // Check if lease already exists
-        if self.leases.contains_key(&lease_id) {
+        self.stats.increment("create");
+        
+        if self.leases.contains_key(&lease.lease_id) {
             return Err(GCError::Internal(format!(
-                "Lease {} already exists",
-                lease_id
+                "Lease with ID {} already exists",
+                lease.lease_id
             )));
         }
 
-        self.leases.insert(lease_id.clone(), lease);
-        self.increment_stat("create_lease");
-
-        debug!("Created lease {} in memory storage", lease_id);
+        self.leases.insert(lease.lease_id.clone(), lease);
         Ok(())
     }
 
     async fn get_lease(&self, lease_id: &str) -> Result<Option<Lease>> {
-        self.increment_stat("get_lease");
+        self.stats.increment("get");
         Ok(self.leases.get(lease_id).map(|entry| entry.clone()))
     }
 
     async fn update_lease(&self, lease: Lease) -> Result<()> {
-        let lease_id = lease.lease_id.clone();
-
-        if self.leases.contains_key(&lease_id) {
-            self.leases.insert(lease_id.clone(), lease);
-            self.increment_stat("update_lease");
-            debug!("Updated lease {} in memory storage", lease_id);
-            Ok(())
-        } else {
-            Err(GCError::LeaseNotFound { lease_id })
+        self.stats.increment("update");
+        
+        if !self.leases.contains_key(&lease.lease_id) {
+            return Err(GCError::LeaseNotFound {
+                lease_id: lease.lease_id,
+            });
         }
+
+        self.leases.insert(lease.lease_id.clone(), lease);
+        Ok(())
     }
 
     async fn delete_lease(&self, lease_id: &str) -> Result<()> {
-        if self.leases.remove(lease_id).is_some() {
-            self.increment_stat("delete_lease");
-            debug!("Deleted lease {} from memory storage", lease_id);
-            Ok(())
-        } else {
-            Err(GCError::LeaseNotFound {
+        self.stats.increment("delete");
+        
+        match self.leases.remove(lease_id) {
+            Some(_) => Ok(()),
+            None => Err(GCError::LeaseNotFound {
                 lease_id: lease_id.to_string(),
-            })
+            }),
         }
     }
 
-    async fn list_leases(
-        &self,
-        filter: LeaseFilter,
-        limit: Option<usize>,
-        offset: Option<usize>,
-    ) -> Result<Vec<Lease>> {
-        self.increment_stat("list_leases");
-
-        let mut leases: Vec<Lease> = self
-            .leases
+    async fn list_leases(&self, filter: Option<LeaseFilter>, limit: Option<usize>) -> Result<Vec<Lease>> {
+        self.stats.increment("list");
+        
+        let mut leases: Vec<Lease> = self.leases
             .iter()
             .map(|entry| entry.value().clone())
-            .filter(|lease| filter.matches(lease))
             .collect();
+
+        // Apply filter if provided
+        if let Some(filter) = filter {
+            leases.retain(|lease| filter.matches(lease));
+        }
 
         // Sort by creation time (newest first)
         leases.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
-        // Apply offset and limit
-        let start = offset.unwrap_or(0);
-        let end = if let Some(limit) = limit {
-            std::cmp::min(start + limit, leases.len())
-        } else {
-            leases.len()
-        };
-
-        if start >= leases.len() {
-            Ok(vec![])
-        } else {
-            Ok(leases[start..end].to_vec())
+        // Apply limit if provided
+        if let Some(limit) = limit {
+            leases.truncate(limit);
         }
+
+        Ok(leases)
     }
 
     async fn count_leases(&self, filter: LeaseFilter) -> Result<usize> {
-        self.increment_stat("count_leases");
-
-        let count = self
-            .leases
+        self.stats.increment("list");
+        
+        let count = self.leases
             .iter()
             .filter(|entry| filter.matches(entry.value()))
             .count();
+        
         Ok(count)
     }
 
     async fn get_expired_leases(&self, grace_period: std::time::Duration) -> Result<Vec<Lease>> {
-        self.increment_stat("get_expired_leases");
-
-        let expired_leases: Vec<Lease> = self
-            .leases
+        self.stats.increment("list");
+        
+        let leases: Vec<Lease> = self.leases
             .iter()
-            .map(|entry| entry.value().clone())
-            .filter(|lease| {
-                // A lease is considered expired if:
-                // 1. It's past its expiration time (is_expired()), OR
-                // 2. It's explicitly marked as expired state
-                // AND it should be cleaned up (past grace period)
-                let is_expired = lease.is_expired() || lease.state == LeaseState::Expired;
-                is_expired && lease.should_cleanup(grace_period)
+            .filter_map(|entry| {
+                let lease = entry.value();
+                if lease.state == LeaseState::Active && lease.is_expired() {
+                    // Check if grace period has also passed
+                    let grace_expires_at = lease.expires_at + chrono::Duration::from_std(grace_period).unwrap();
+                    if Utc::now() > grace_expires_at {
+                        Some(lease.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             })
             .collect();
 
-        debug!(
-            "Found {} expired leases ready for cleanup",
-            expired_leases.len()
-        );
-        Ok(expired_leases)
+        Ok(leases)
+    }
+
+    async fn get_leases_by_service(&self, service_id: &str) -> Result<Vec<Lease>> {
+        self.stats.increment("list");
+        
+        let leases: Vec<Lease> = self.leases
+            .iter()
+            .filter_map(|entry| {
+                let lease = entry.value();
+                if lease.service_id == service_id {
+                    Some(lease.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Ok(leases)
+    }
+
+    async fn get_leases_by_type(&self, object_type: ObjectType) -> Result<Vec<Lease>> {
+        self.stats.increment("list");
+        
+        let leases: Vec<Lease> = self.leases
+            .iter()
+            .filter_map(|entry| {
+                let lease = entry.value();
+                if lease.object_type == object_type {
+                    Some(lease.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Ok(leases)
     }
 
     async fn get_stats(&self) -> Result<LeaseStats> {
-        self.increment_stat("get_stats");
-
+        self.stats.increment("list");
+        
         let mut stats = LeaseStats::default();
         let mut total_duration = chrono::Duration::zero();
         let mut total_renewals = 0u64;
@@ -203,17 +235,17 @@ impl Storage for MemoryStorage {
             }
 
             // Count by service
-            *stats
-                .leases_by_service
-                .entry(lease.service_id.clone())
-                .or_insert(0) += 1;
+            *stats.leases_by_service.entry(lease.service_id.clone()).or_insert(0) += 1;
 
             // Count by type
             let type_name = format!("{:?}", lease.object_type);
             *stats.leases_by_type.entry(type_name).or_insert(0) += 1;
 
-            // Calculate averages
-            total_duration += lease.expires_at - lease.created_at;
+            // Calculate average duration
+            let lease_duration = lease.expires_at - lease.created_at;
+            total_duration = total_duration + lease_duration;
+
+            // Calculate average renewals
             total_renewals += lease.renewal_count as u64;
         }
 
@@ -222,262 +254,389 @@ impl Storage for MemoryStorage {
             stats.average_renewal_count = total_renewals as f64 / stats.total_leases as f64;
         }
 
-        debug!(
-            "Memory storage stats: {} total, {} active, {} expired",
-            stats.total_leases, stats.active_leases, stats.expired_leases
-        );
-
         Ok(stats)
     }
 
-    async fn cleanup(&self) -> Result<()> {
-        self.increment_stat("cleanup");
+    async fn health_check(&self) -> Result<bool> {
+        // For memory storage, we're healthy if we can access the data structure
+        Ok(true)
+    }
 
-        // Remove expired leases that have passed their grace period
-        let grace_period = std::time::Duration::from_secs(300); // 5 minutes default
-        let to_remove: Vec<String> = self
-            .leases
+    async fn cleanup(&self) -> Result<usize> {
+        self.stats.increment("delete");
+        
+        let now = Utc::now();
+        let mut cleaned_count = 0;
+        
+        // Find and remove expired leases that are in Released state
+        let keys_to_remove: Vec<String> = self.leases
             .iter()
             .filter_map(|entry| {
                 let lease = entry.value();
-                if lease.state == LeaseState::Expired {
-                    // Check if grace period has passed
-                    if lease.should_cleanup(grace_period) {
-                        Some(lease.lease_id.clone())
-                    } else {
-                        None
-                    }
+                if lease.state == LeaseState::Released || 
+                   (lease.state == LeaseState::Expired && lease.expires_at < now) {
+                    Some(lease.lease_id.clone())
                 } else {
                     None
                 }
             })
             .collect();
 
-        let removed_count = to_remove.len();
-        for lease_id in to_remove {
-            self.leases.remove(&lease_id);
+        for key in keys_to_remove {
+            if self.leases.remove(&key).is_some() {
+                cleaned_count += 1;
+            }
         }
 
-        if removed_count > 0 {
-            debug!(
-                "Cleaned up {} expired leases from memory storage",
-                removed_count
-            );
-        }
+        Ok(cleaned_count)
+    }
 
+    async fn count_active_leases_for_service(&self, service_id: &str) -> Result<usize> {
+        self.stats.increment("list");
+        
+        let count = self.leases
+            .iter()
+            .filter(|entry| {
+                let lease = entry.value();
+                lease.service_id == service_id && 
+                lease.state == LeaseState::Active && 
+                !lease.is_expired()
+            })
+            .count();
+
+        Ok(count)
+    }
+
+    async fn mark_lease_expired(&self, lease_id: &str) -> Result<()> {
+        self.stats.increment("update");
+        
+        let mut lease = self.leases.get_mut(lease_id)
+            .ok_or_else(|| GCError::LeaseNotFound {
+                lease_id: lease_id.to_string(),
+            })?;
+
+        lease.expire();
         Ok(())
     }
-}
 
-#[async_trait]
-impl ExtendedStorage for MemoryStorage {
-    async fn get_info(&self) -> Result<StorageInfo> {
-        Ok(StorageInfo::memory())
-    }
+    async fn mark_lease_released(&self, lease_id: &str) -> Result<()> {
+        self.stats.increment("update");
+        
+        let mut lease = self.leases.get_mut(lease_id)
+            .ok_or_else(|| GCError::LeaseNotFound {
+                lease_id: lease_id.to_string(),
+            })?;
 
-    async fn migrate(&self) -> Result<()> {
-        // Memory storage doesn't need migrations
+        lease.release();
         Ok(())
-    }
-
-    async fn create_indexes(&self) -> Result<()> {
-        // Memory storage doesn't use indexes
-        Ok(())
-    }
-
-    async fn get_detailed_stats(&self) -> Result<DetailedStorageStats> {
-        // Estimate memory usage (very rough)
-        let lease_count = self.leases.len();
-        let estimated_size_per_lease = 512; // Rough estimate in bytes
-        let estimated_total_size = (lease_count * estimated_size_per_lease) as u64;
-
-        Ok(DetailedStorageStats {
-            total_storage_size_bytes: Some(estimated_total_size),
-            index_size_bytes: Some(0),   // No indexes in memory
-            connection_pool_stats: None, // No connection pool
-            query_performance: Some(super::QueryPerformanceStats {
-                average_query_time_ms: 0.1, // Very fast for memory operations
-                slowest_query_time_ms: 1,
-                total_queries: self.get_stat("get_lease") + self.get_stat("list_leases"),
-                failed_queries: 0, // Memory operations rarely fail
-            }),
-        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lease::{Lease, LeaseFilter, ObjectType};
+    use crate::lease::{CleanupConfig, ObjectType};
     use std::collections::HashMap;
-    use std::time::Duration;
-
-    fn create_test_lease(id: &str, service_id: &str) -> Lease {
-        Lease::new(
-            format!("object-{}", id),
-            ObjectType::DatabaseRow,
-            service_id.to_string(),
-            Duration::from_secs(300),
-            HashMap::new(),
-            None,
-        )
-    }
+    use tokio::time::sleep;
 
     #[tokio::test]
-    async fn test_create_and_get_lease() {
+    async fn test_basic_crud_operations() {
         let storage = MemoryStorage::new();
-        let lease = create_test_lease("1", "service-1");
+
+        // Create a test lease
+        let lease = Lease::new(
+            "test-object".to_string(),
+            ObjectType::TemporaryFile,
+            "test-service".to_string(),
+            std::time::Duration::from_secs(300),
+            HashMap::new(),
+            None,
+        );
+
         let lease_id = lease.lease_id.clone();
 
-        // Create lease
+        // Test create
         storage.create_lease(lease.clone()).await.unwrap();
 
-        // Get lease
+        // Test get
         let retrieved = storage.get_lease(&lease_id).await.unwrap();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().lease_id, lease_id);
-    }
 
-    #[tokio::test]
-    async fn test_update_lease() {
-        let storage = MemoryStorage::new();
-        let mut lease = create_test_lease("1", "service-1");
-        let lease_id = lease.lease_id.clone();
+        // Test update
+        let mut updated_lease = lease.clone();
+        updated_lease.renewal_count = 1;
+        storage.update_lease(updated_lease).await.unwrap();
 
-        // Create lease
-        storage.create_lease(lease.clone()).await.unwrap();
+        let retrieved = storage.get_lease(&lease_id).await.unwrap().unwrap();
+        assert_eq!(retrieved.renewal_count, 1);
 
-        // Update lease
-        lease.renewal_count = 5;
-        storage.update_lease(lease.clone()).await.unwrap();
-
-        // Verify update
-        let updated = storage.get_lease(&lease_id).await.unwrap().unwrap();
-        assert_eq!(updated.renewal_count, 5);
-    }
-
-    #[tokio::test]
-    async fn test_delete_lease() {
-        let storage = MemoryStorage::new();
-        let lease = create_test_lease("1", "service-1");
-        let lease_id = lease.lease_id.clone();
-
-        // Create lease
-        storage.create_lease(lease).await.unwrap();
-
-        // Delete lease
+        // Test delete
         storage.delete_lease(&lease_id).await.unwrap();
 
         // Verify deletion
-        let retrieved = storage.get_lease(&lease_id).await.unwrap();
-        assert!(retrieved.is_none());
+        let deleted = storage.get_lease(&lease_id).await.unwrap();
+        assert!(deleted.is_none());
     }
 
     #[tokio::test]
     async fn test_list_leases_with_filter() {
         let storage = MemoryStorage::new();
 
-        // Create leases for different services
-        let lease1 = create_test_lease("1", "service-1");
-        let lease2 = create_test_lease("2", "service-1");
-        let lease3 = create_test_lease("3", "service-2");
+        // Create test leases
+        let lease1 = Lease::new(
+            "object1".to_string(),
+            ObjectType::TemporaryFile,
+            "service1".to_string(),
+            std::time::Duration::from_secs(300),
+            HashMap::new(),
+            None,
+        );
+
+        let lease2 = Lease::new(
+            "object2".to_string(),
+            ObjectType::DatabaseRow,
+            "service2".to_string(),
+            std::time::Duration::from_secs(300),
+            HashMap::new(),
+            None,
+        );
+
+        storage.create_lease(lease1).await.unwrap();
+        storage.create_lease(lease2).await.unwrap();
+
+        // Test list all
+        let all_leases = storage.list_leases(None, None).await.unwrap();
+        assert_eq!(all_leases.len(), 2);
+
+        // Test filter by service
+        let filter = LeaseFilter {
+            service_id: Some("service1".to_string()),
+            ..Default::default()
+        };
+        let filtered_leases = storage.list_leases(Some(filter), None).await.unwrap();
+        assert_eq!(filtered_leases.len(), 1);
+        assert_eq!(filtered_leases[0].service_id, "service1");
+
+        // Test limit
+        let limited_leases = storage.list_leases(None, Some(1)).await.unwrap();
+        assert_eq!(limited_leases.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_expired_leases() {
+        let storage = MemoryStorage::new();
+
+        // Create a lease that expires immediately
+        let lease = Lease::new(
+            "expiring-object".to_string(),
+            ObjectType::TemporaryFile,
+            "test-service".to_string(),
+            std::time::Duration::from_millis(1), // Very short duration
+            HashMap::new(),
+            None,
+        );
+
+        storage.create_lease(lease).await.unwrap();
+
+        // Wait for expiration
+        sleep(std::time::Duration::from_millis(10)).await;
+
+        // Test get expired leases with no grace period
+        let expired = storage.get_expired_leases(std::time::Duration::from_secs(0)).await.unwrap();
+        assert_eq!(expired.len(), 1);
+
+        // Test with long grace period (should not return expired lease)
+        let expired_with_grace = storage.get_expired_leases(std::time::Duration::from_secs(3600)).await.unwrap();
+        assert_eq!(expired_with_grace.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_service_and_type_queries() {
+        let storage = MemoryStorage::new();
+
+        let lease1 = Lease::new(
+            "object1".to_string(),
+            ObjectType::TemporaryFile,
+            "service1".to_string(),
+            std::time::Duration::from_secs(300),
+            HashMap::new(),
+            None,
+        );
+
+        let lease2 = Lease::new(
+            "object2".to_string(),
+            ObjectType::TemporaryFile,
+            "service1".to_string(),
+            std::time::Duration::from_secs(300),
+            HashMap::new(),
+            None,
+        );
+
+        let lease3 = Lease::new(
+            "object3".to_string(),
+            ObjectType::DatabaseRow,
+            "service2".to_string(),
+            std::time::Duration::from_secs(300),
+            HashMap::new(),
+            None,
+        );
 
         storage.create_lease(lease1).await.unwrap();
         storage.create_lease(lease2).await.unwrap();
         storage.create_lease(lease3).await.unwrap();
 
-        // Filter by service
-        let filter = LeaseFilter {
-            service_id: Some("service-1".to_string()),
-            ..Default::default()
-        };
+        // Test get by service
+        let service1_leases = storage.get_leases_by_service("service1").await.unwrap();
+        assert_eq!(service1_leases.len(), 2);
 
-        let leases = storage.list_leases(filter, None, None).await.unwrap();
-        assert_eq!(leases.len(), 2);
-        assert!(leases.iter().all(|l| l.service_id == "service-1"));
+        // Test get by type
+        let file_leases = storage.get_leases_by_type(ObjectType::TemporaryFile).await.unwrap();
+        assert_eq!(file_leases.len(), 2);
+
+        let db_leases = storage.get_leases_by_type(ObjectType::DatabaseRow).await.unwrap();
+        assert_eq!(db_leases.len(), 1);
     }
 
     #[tokio::test]
-    async fn test_count_leases() {
+    async fn test_lease_state_management() {
         let storage = MemoryStorage::new();
 
-        // Create leases
-        storage
-            .create_lease(create_test_lease("1", "service-1"))
-            .await
-            .unwrap();
-        storage
-            .create_lease(create_test_lease("2", "service-1"))
-            .await
-            .unwrap();
+        let lease = Lease::new(
+            "test-object".to_string(),
+            ObjectType::TemporaryFile,
+            "test-service".to_string(),
+            std::time::Duration::from_secs(300),
+            HashMap::new(),
+            None,
+        );
 
-        let filter = LeaseFilter {
-            service_id: Some("service-1".to_string()),
-            ..Default::default()
-        };
+        let lease_id = lease.lease_id.clone();
+        storage.create_lease(lease).await.unwrap();
 
-        let count = storage.count_leases(filter).await.unwrap();
-        assert_eq!(count, 2);
+        // Test mark expired
+        storage.mark_lease_expired(&lease_id).await.unwrap();
+        let expired_lease = storage.get_lease(&lease_id).await.unwrap().unwrap();
+        assert_eq!(expired_lease.state, LeaseState::Expired);
+
+        // Test mark released
+        storage.mark_lease_released(&lease_id).await.unwrap();
+        let released_lease = storage.get_lease(&lease_id).await.unwrap().unwrap();
+        assert_eq!(released_lease.state, LeaseState::Released);
     }
 
     #[tokio::test]
-    async fn test_get_stats() {
+    async fn test_statistics() {
         let storage = MemoryStorage::new();
 
-        // Create leases
-        storage
-            .create_lease(create_test_lease("1", "service-1"))
-            .await
-            .unwrap();
-        storage
-            .create_lease(create_test_lease("2", "service-2"))
-            .await
-            .unwrap();
+        // Create test leases with different states
+        let mut lease1 = Lease::new(
+            "object1".to_string(),
+            ObjectType::TemporaryFile,
+            "service1".to_string(),
+            std::time::Duration::from_secs(300),
+            HashMap::new(),
+            None,
+        );
+
+        let mut lease2 = Lease::new(
+            "object2".to_string(),
+            ObjectType::DatabaseRow,
+            "service2".to_string(),
+            std::time::Duration::from_secs(300),
+            HashMap::new(),
+            None,
+        );
+        lease2.release();
+
+        storage.create_lease(lease1).await.unwrap();
+        storage.create_lease(lease2).await.unwrap();
 
         let stats = storage.get_stats().await.unwrap();
         assert_eq!(stats.total_leases, 2);
-        assert_eq!(stats.active_leases, 2);
+        assert_eq!(stats.active_leases, 1);
+        assert_eq!(stats.released_leases, 1);
         assert_eq!(stats.leases_by_service.len(), 2);
+        assert_eq!(stats.leases_by_type.len(), 2);
     }
 
     #[tokio::test]
     async fn test_cleanup() {
         let storage = MemoryStorage::new();
 
-        // Create an expired lease
-        let mut lease = create_test_lease("1", "service-1");
-
-        // CRITICAL FIX: Set expiration far enough in the past
-        // The cleanup() method uses a 5-minute (300 second) grace period internally
-        // So we need to expire the lease more than 5 minutes ago
-        lease.expires_at = chrono::Utc::now() - chrono::Duration::minutes(10); // 10 minutes ago
-        lease.expire(); // Set state to Expired
+        // Create a released lease
+        let mut lease = Lease::new(
+            "test-object".to_string(),
+            ObjectType::TemporaryFile,
+            "test-service".to_string(),
+            std::time::Duration::from_secs(300),
+            HashMap::new(),
+            None,
+        );
+        lease.release();
 
         storage.create_lease(lease).await.unwrap();
 
-        // Run cleanup - this uses the internal grace period of 300 seconds
-        storage.cleanup().await.unwrap();
+        // Verify lease exists
+        let all_leases = storage.list_leases(None, None).await.unwrap();
+        assert_eq!(all_leases.len(), 1);
 
-        // After cleanup, the lease should be removed since it expired > 5 minutes ago
-        let stats = storage.get_stats().await.unwrap();
-        assert_eq!(
-            stats.total_leases, 0,
-            "Cleanup should have removed the expired lease"
-        );
+        // Run cleanup
+        let cleaned = storage.cleanup().await.unwrap();
+        assert_eq!(cleaned, 1);
+
+        // Verify lease was removed
+        let remaining_leases = storage.list_leases(None, None).await.unwrap();
+        assert_eq!(remaining_leases.len(), 0);
     }
 
     #[tokio::test]
-    async fn test_extended_storage_features() {
+    async fn test_count_active_leases_for_service() {
         let storage = MemoryStorage::new();
 
-        // Test storage info
-        let info = storage.get_info().await.unwrap();
-        assert_eq!(info.backend_type, "memory");
-        assert!(!info.supports_transactions);
+        // Create active lease
+        let lease1 = Lease::new(
+            "object1".to_string(),
+            ObjectType::TemporaryFile,
+            "service1".to_string(),
+            std::time::Duration::from_secs(300),
+            HashMap::new(),
+            None,
+        );
 
-        // Test detailed stats
-        let detailed_stats = storage.get_detailed_stats().await.unwrap();
-        assert!(detailed_stats.total_storage_size_bytes.is_some());
-        assert!(detailed_stats.query_performance.is_some());
+        // Create released lease for same service
+        let mut lease2 = Lease::new(
+            "object2".to_string(),
+            ObjectType::TemporaryFile,
+            "service1".to_string(),
+            std::time::Duration::from_secs(300),
+            HashMap::new(),
+            None,
+        );
+        lease2.release();
+
+        // Create active lease for different service
+        let lease3 = Lease::new(
+            "object3".to_string(),
+            ObjectType::TemporaryFile,
+            "service2".to_string(),
+            std::time::Duration::from_secs(300),
+            HashMap::new(),
+            None,
+        );
+
+        storage.create_lease(lease1).await.unwrap();
+        storage.create_lease(lease2).await.unwrap();
+        storage.create_lease(lease3).await.unwrap();
+
+        let count = storage.count_active_leases_for_service("service1").await.unwrap();
+        assert_eq!(count, 1); // Only one active lease for service1
+    }
+
+    #[tokio::test]
+    async fn test_health_check() {
+        let storage = MemoryStorage::new();
+        let healthy = storage.health_check().await.unwrap();
+        assert!(healthy);
     }
 }

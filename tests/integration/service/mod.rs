@@ -88,7 +88,7 @@ impl ServiceTestHarness {
     /// Stop the service
     pub async fn stop_service(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if let Some(service) = &self.service {
-            service.shutdown().await?;
+            service.shutdown().await;
         }
         self.service = None;
         Ok(())

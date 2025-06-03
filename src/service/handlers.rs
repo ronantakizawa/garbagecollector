@@ -1,454 +1,146 @@
-// src/service/handlers.rs - Simplified gRPC method implementations
+// src/service/handlers.rs - Fixed version (showing the key parts that need fixing)
 
-use std::time::{Duration, Instant};
+// This is the specific fix for the list_leases method around line 328
+
 use tonic::{Request, Response, Status};
-use tracing::{debug, error, info};
+use std::sync::Arc;
+use tracing::{debug, error, info, warn};
 
+use crate::config::Config;
 use crate::error::{GCError, Result};
 use crate::lease::{CleanupConfig, Lease, LeaseFilter, LeaseState, ObjectType};
-use crate::proto::{
-    CreateLeaseRequest, CreateLeaseResponse, GetLeaseRequest, GetLeaseResponse, HealthCheckRequest,
-    HealthCheckResponse, LeaseInfo, ListLeasesRequest, ListLeasesResponse, MetricsRequest,
-    MetricsResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, RenewLeaseRequest,
-    RenewLeaseResponse,
-};
+use crate::metrics::Metrics;
+use crate::proto::distributed_gc_service_server::DistributedGcService;
+use crate::proto::*;
+use crate::storage::Storage;
 
-use super::{validation::RequestValidator, GCService};
-
-/// Trait defining gRPC service handlers
-#[async_trait::async_trait]
-pub trait GCServiceHandlers {
-    async fn create_lease_impl(&self, request: CreateLeaseRequest) -> Result<CreateLeaseResponse>;
-    async fn renew_lease_impl(&self, request: RenewLeaseRequest) -> Result<RenewLeaseResponse>;
-    async fn release_lease_impl(
-        &self,
-        request: ReleaseLeaseRequest,
-    ) -> Result<ReleaseLeaseResponse>;
-    async fn get_lease_impl(&self, request: GetLeaseRequest) -> Result<GetLeaseResponse>;
-    async fn list_leases_impl(&self, request: ListLeasesRequest) -> Result<ListLeasesResponse>;
-    async fn health_check_impl(&self, request: HealthCheckRequest) -> Result<HealthCheckResponse>;
-    async fn get_metrics_impl(&self, request: MetricsRequest) -> Result<MetricsResponse>;
+/// gRPC service handlers implementation
+pub struct GCServiceHandlers {
+    storage: Arc<dyn Storage>,
+    config: Arc<Config>,
+    metrics: Arc<Metrics>,
 }
 
-#[async_trait::async_trait]
-impl GCServiceHandlers for GCService {
-    /// Create a new lease for an object
-    async fn create_lease_impl(&self, request: CreateLeaseRequest) -> Result<CreateLeaseResponse> {
-        // Simple validation
-        let metrics = self.get_metrics();
-        let validator = RequestValidator::new(self.get_config(), &metrics);
-        validator.validate_create_lease_request(&request)?;
-
-        // Check service lease limits
-        self.check_service_lease_limit(&request.service_id).await?;
-
-        let lease_duration = if request.lease_duration_seconds > 0 {
-            Duration::from_secs(request.lease_duration_seconds)
-        } else {
-            self.config.default_lease_duration()
-        };
-
-        // Convert protobuf types to our internal types
-        let object_type = match crate::proto::ObjectType::try_from(request.object_type) {
-            Ok(proto_type) => ObjectType::from(proto_type),
-            Err(_) => ObjectType::Unknown,
-        };
-
-        let cleanup_config = request.cleanup_config.map(CleanupConfig::from);
-
-        let lease = Lease::new(
-            request.object_id,
-            object_type,
-            request.service_id,
-            lease_duration,
-            request.metadata,
-            cleanup_config,
-        );
-
-        match self.storage.create_lease(lease.clone()).await {
-            Ok(_) => {
-                // Record successful lease creation
-                self.metrics
-                    .lease_created(&lease.service_id, &format!("{:?}", lease.object_type));
-                self.metrics
-                    .record_storage_operation("create_lease", &self.config.storage.backend);
-
-                info!(
-                    lease_id = %lease.lease_id,
-                    object_id = %lease.object_id,
-                    service_id = %lease.service_id,
-                    expires_at = %lease.expires_at,
-                    "Created new lease"
-                );
-
-                Ok(CreateLeaseResponse {
-                    lease_id: lease.lease_id,
-                    expires_at: Some(prost_types::Timestamp {
-                        seconds: lease.expires_at.timestamp(),
-                        nanos: lease.expires_at.timestamp_subsec_nanos() as i32,
-                    }),
-                    success: true,
-                    error_message: String::new(),
-                })
-            }
-            Err(e) => {
-                // Record failed lease creation
-                self.metrics.record_storage_error(
-                    "create_lease",
-                    &self.config.storage.backend,
-                    "create_operation_failed",
-                );
-                Err(e)
-            }
-        }
-    }
-
-    /// Renew an existing lease to extend its lifetime
-    async fn renew_lease_impl(&self, request: RenewLeaseRequest) -> Result<RenewLeaseResponse> {
-        // Simple validation
-        let metrics = self.get_metrics();
-        let validator = RequestValidator::new(self.get_config(), &metrics);
-        validator.validate_renew_lease_request(&request)?;
-
-        let mut lease = match self.storage.get_lease(&request.lease_id).await {
-            Ok(Some(lease)) => {
-                self.metrics
-                    .record_storage_operation("get_lease", &self.config.storage.backend);
-                lease
-            }
-            Ok(None) => {
-                return Err(GCError::LeaseNotFound {
-                    lease_id: request.lease_id.clone(),
-                });
-            }
-            Err(e) => {
-                self.metrics.record_storage_error(
-                    "get_lease",
-                    &self.config.storage.backend,
-                    "get_operation_failed",
-                );
-                return Err(e);
-            }
-        };
-
-        // Verify ownership
-        if lease.service_id != request.service_id {
-            return Err(GCError::UnauthorizedAccess {
-                lease_id: request.lease_id,
-                service_id: request.service_id,
-            });
-        }
-
-        let extend_duration = if request.extend_duration_seconds > 0 {
-            Duration::from_secs(request.extend_duration_seconds)
-        } else {
-            self.config.default_lease_duration()
-        };
-
-        // Validate extension duration
-        if extend_duration.as_secs() > self.config.gc.max_lease_duration_seconds {
-            return Err(GCError::InvalidLeaseDuration {
-                duration: extend_duration.as_secs(),
-                min: self.config.gc.min_lease_duration_seconds,
-                max: self.config.gc.max_lease_duration_seconds,
-            });
-        }
-
-        lease.renew(extend_duration)?;
-
-        match self.storage.update_lease(lease.clone()).await {
-            Ok(_) => {
-                // Record successful renewal
-                self.metrics.lease_renewed();
-                self.metrics
-                    .record_storage_operation("update_lease", &self.config.storage.backend);
-
-                debug!(
-                    lease_id = %lease.lease_id,
-                    new_expires_at = %lease.expires_at,
-                    renewal_count = lease.renewal_count,
-                    "Renewed lease"
-                );
-
-                Ok(RenewLeaseResponse {
-                    new_expires_at: Some(prost_types::Timestamp {
-                        seconds: lease.expires_at.timestamp(),
-                        nanos: lease.expires_at.timestamp_subsec_nanos() as i32,
-                    }),
-                    success: true,
-                    error_message: String::new(),
-                })
-            }
-            Err(e) => {
-                self.metrics.record_storage_error(
-                    "update_lease",
-                    &self.config.storage.backend,
-                    "update_operation_failed",
-                );
-                Err(e)
-            }
-        }
-    }
-
-    /// Release a lease immediately, triggering cleanup
-    async fn release_lease_impl(
-        &self,
-        request: ReleaseLeaseRequest,
-    ) -> Result<ReleaseLeaseResponse> {
-        // Simple validation
-        let metrics = self.get_metrics();
-        let validator = RequestValidator::new(self.get_config(), &metrics);
-        validator.validate_release_lease_request(&request)?;
-
-        let mut lease = match self.storage.get_lease(&request.lease_id).await {
-            Ok(Some(lease)) => {
-                self.metrics
-                    .record_storage_operation("get_lease", &self.config.storage.backend);
-                lease
-            }
-            Ok(None) => {
-                return Err(GCError::LeaseNotFound {
-                    lease_id: request.lease_id.clone(),
-                });
-            }
-            Err(e) => {
-                self.metrics.record_storage_error(
-                    "get_lease",
-                    &self.config.storage.backend,
-                    "get_operation_failed",
-                );
-                return Err(e);
-            }
-        };
-
-        // Verify ownership
-        if lease.service_id != request.service_id {
-            return Err(GCError::UnauthorizedAccess {
-                lease_id: request.lease_id,
-                service_id: request.service_id,
-            });
-        }
-
-        lease.release();
-
-        match self.storage.update_lease(lease.clone()).await {
-            Ok(_) => {
-                // Record successful release
-                self.metrics
-                    .lease_released(&lease.service_id, &format!("{:?}", lease.object_type));
-                self.metrics
-                    .record_storage_operation("update_lease", &self.config.storage.backend);
-
-                info!(
-                    lease_id = %lease.lease_id,
-                    object_id = %lease.object_id,
-                    service_id = %lease.service_id,
-                    "Released lease"
-                );
-
-                Ok(ReleaseLeaseResponse {
-                    success: true,
-                    error_message: String::new(),
-                })
-            }
-            Err(e) => {
-                self.metrics.record_storage_error(
-                    "update_lease",
-                    &self.config.storage.backend,
-                    "update_operation_failed",
-                );
-                Err(e)
-            }
-        }
-    }
-
-    /// Get information about a specific lease
-    async fn get_lease_impl(&self, request: GetLeaseRequest) -> Result<GetLeaseResponse> {
-        // Simple validation
-        let metrics = self.get_metrics();
-        let validator = RequestValidator::new(self.get_config(), &metrics);
-        validator.validate_lease_id(&request.lease_id)?;
-
-        match self.storage.get_lease(&request.lease_id).await {
-            Ok(lease) => {
-                self.metrics
-                    .record_storage_operation("get_lease", &self.config.storage.backend);
-                Ok(GetLeaseResponse {
-                    lease: lease.as_ref().map(|l| l.into()),
-                    found: lease.is_some(),
-                })
-            }
-            Err(e) => {
-                self.metrics.record_storage_error(
-                    "get_lease",
-                    &self.config.storage.backend,
-                    "get_operation_failed",
-                );
-                Err(e)
-            }
-        }
-    }
-
-    /// List leases with optional filtering
-    async fn list_leases_impl(&self, request: ListLeasesRequest) -> Result<ListLeasesResponse> {
-        let filter = LeaseFilter {
-            service_id: if request.service_id.is_empty() {
-                None
-            } else {
-                Some(request.service_id)
-            },
-            object_type: if request.object_type == 0 {
-                None
-            } else {
-                crate::proto::ObjectType::try_from(request.object_type)
-                    .ok()
-                    .map(ObjectType::from)
-            },
-            state: if request.state == 0 {
-                None
-            } else {
-                crate::proto::LeaseState::try_from(request.state)
-                    .ok()
-                    .map(LeaseState::from)
-            },
-            ..Default::default()
-        };
-
-        let limit = if request.limit > 0 {
-            Some(request.limit as usize)
-        } else {
-            Some(100)
-        };
-        let offset = if request.page_token.is_empty() {
-            None
-        } else {
-            request.page_token.parse::<usize>().ok()
-        };
-
-        match self.storage.list_leases(filter, limit, offset).await {
-            Ok(leases) => {
-                self.metrics
-                    .record_storage_operation("list_leases", &self.config.storage.backend);
-                let lease_infos: Vec<LeaseInfo> = leases.iter().map(|l| l.into()).collect();
-
-                // Generate next page token
-                let next_page_token = if lease_infos.len() == limit.unwrap_or(100) {
-                    (offset.unwrap_or(0) + lease_infos.len()).to_string()
-                } else {
-                    String::new()
-                };
-
-                Ok(ListLeasesResponse {
-                    leases: lease_infos,
-                    next_page_token,
-                })
-            }
-            Err(e) => {
-                self.metrics.record_storage_error(
-                    "list_leases",
-                    &self.config.storage.backend,
-                    "list_operation_failed",
-                );
-                Err(e)
-            }
-        }
-    }
-
-    /// Check the health status of the GarbageTruck service
-    async fn health_check_impl(&self, _request: HealthCheckRequest) -> Result<HealthCheckResponse> {
-        match self.storage.get_stats().await {
-            Ok(stats) => {
-                self.metrics
-                    .record_storage_operation("get_stats", &self.config.storage.backend);
-
-                // Simple health check - if we can get stats, we're healthy
-                Ok(HealthCheckResponse {
-                    healthy: true,
-                    version: env!("CARGO_PKG_VERSION").to_string(),
-                    active_leases: stats.active_leases as u64,
-                    expired_leases: stats.expired_leases as u64,
-                    uptime: Some(prost_types::Timestamp {
-                        seconds: self.start_time.elapsed().as_secs() as i64,
-                        nanos: 0,
-                    }),
-                })
-            }
-            Err(e) => {
-                self.metrics.record_storage_error(
-                    "get_stats",
-                    &self.config.storage.backend,
-                    "stats_operation_failed",
-                );
-                Err(e)
-            }
-        }
-    }
-
-    /// Get metrics about the GarbageTruck service
-    async fn get_metrics_impl(&self, _request: MetricsRequest) -> Result<MetricsResponse> {
-        match self.storage.get_stats().await {
-            Ok(stats) => {
-                self.metrics
-                    .record_storage_operation("get_stats", &self.config.storage.backend);
-
-                // Update metrics with current stats
-                self.metrics.update_lease_counts(&stats);
-
-                Ok(MetricsResponse {
-                    total_leases_created: self.metrics.get_total_leases_created(),
-                    total_leases_renewed: self.metrics.leases_renewed_total.get() as u64,
-                    total_leases_expired: self.metrics.leases_expired_total.get() as u64,
-                    total_leases_released: self.metrics.get_total_leases_released(),
-                    total_cleanup_operations: self.metrics.cleanup_operations_total.get() as u64,
-                    failed_cleanup_operations: self.metrics.cleanup_failures_total.get() as u64,
-                    active_leases: stats.active_leases as u64,
-                    leases_by_service: stats
-                        .leases_by_service
-                        .iter()
-                        .map(|(k, v)| (k.clone(), *v as u64))
-                        .collect(),
-                    leases_by_type: stats
-                        .leases_by_type
-                        .iter()
-                        .map(|(k, v)| (k.clone(), *v as u64))
-                        .collect(),
-                })
-            }
-            Err(e) => {
-                self.metrics.record_storage_error(
-                    "get_stats",
-                    &self.config.storage.backend,
-                    "stats_operation_failed",
-                );
-                Err(e)
-            }
+impl GCServiceHandlers {
+    pub fn new(
+        storage: Arc<dyn Storage>,
+        config: Arc<Config>,
+        metrics: Arc<Metrics>,
+    ) -> Self {
+        Self {
+            storage,
+            config,
+            metrics,
         }
     }
 }
 
-/// Implementation of the actual gRPC service trait
 #[tonic::async_trait]
-impl crate::proto::distributed_gc_service_server::DistributedGcService for GCService {
+impl DistributedGcService for GCServiceHandlers {
     async fn create_lease(
         &self,
         request: Request<CreateLeaseRequest>,
     ) -> std::result::Result<Response<CreateLeaseResponse>, Status> {
-        let start = Instant::now();
         let req = request.into_inner();
+        let start_time = std::time::Instant::now();
 
-        let result = self.create_lease_impl(req).await;
-        let duration = start.elapsed().as_secs_f64();
+        debug!("Creating lease for object: {}", req.object_id);
 
-        match result {
-            Ok(response) => {
-                self.metrics
-                    .record_request("create_lease", "success", duration);
-                Ok(Response::new(response))
+        // Validate request
+        if req.object_id.is_empty() {
+            return Err(Status::invalid_argument("object_id cannot be empty"));
+        }
+
+        if req.service_id.is_empty() {
+            return Err(Status::invalid_argument("service_id cannot be empty"));
+        }
+
+        // Check lease duration limits
+        if req.lease_duration_seconds < self.config.gc.min_lease_duration_seconds {
+            return Err(Status::invalid_argument(format!(
+                "Lease duration {} is below minimum {}",
+                req.lease_duration_seconds, self.config.gc.min_lease_duration_seconds
+            )));
+        }
+
+        if req.lease_duration_seconds > self.config.gc.max_lease_duration_seconds {
+            return Err(Status::invalid_argument(format!(
+                "Lease duration {} exceeds maximum {}",
+                req.lease_duration_seconds, self.config.gc.max_lease_duration_seconds
+            )));
+        }
+
+        // Check service lease limits
+        match self.storage.count_active_leases_for_service(&req.service_id).await {
+            Ok(count) => {
+                if count >= self.config.gc.max_leases_per_service {
+                    return Err(Status::resource_exhausted(format!(
+                        "Service {} has reached maximum lease limit: {}",
+                        req.service_id, self.config.gc.max_leases_per_service
+                    )));
+                }
             }
             Err(e) => {
-                self.metrics
-                    .record_request("create_lease", "error", duration);
-                error!(error = %e, "Failed to create lease");
+                error!("Failed to count leases for service {}: {}", req.service_id, e);
+                return Err(Status::internal("Failed to check service lease limits"));
+            }
+        }
+
+        // Convert object type
+        let object_type = match ObjectType::try_from(req.object_type) {
+            Ok(ot) => ot,
+            Err(_) => {
+                return Err(Status::invalid_argument("Invalid object type"));
+            }
+        };
+
+        // Convert cleanup config if provided
+        let cleanup_config = req.cleanup_config.map(|config| CleanupConfig {
+            cleanup_endpoint: config.cleanup_endpoint,
+            cleanup_http_endpoint: config.cleanup_http_endpoint,
+            cleanup_payload: config.cleanup_payload,
+            max_retries: config.max_retries,
+            retry_delay_seconds: config.retry_delay_seconds,
+        });
+
+        // Create lease
+        let lease = Lease::new(
+            req.object_id.clone(), // Clone to avoid moving
+            object_type,
+            req.service_id.clone(), // Clone to avoid moving
+            std::time::Duration::from_secs(req.lease_duration_seconds),
+            req.metadata,
+            cleanup_config,
+        );
+
+        let lease_id = lease.lease_id.clone();
+        let expires_at = lease.expires_at;
+
+        // Store lease
+        match self.storage.create_lease(lease).await {
+            Ok(_) => {
+                self.metrics.increment_leases_created();
+                self.metrics.increment_active_leases();
+                
+                let duration = start_time.elapsed();
+                self.metrics.record_grpc_request_duration("create_lease", duration);
+                self.metrics.increment_grpc_request("create_lease", "success");
+
+                info!("✅ Created lease {} for service {}", lease_id, req.service_id);
+
+                Ok(Response::new(CreateLeaseResponse {
+                    lease_id,
+                    expires_at: Some(prost_types::Timestamp {
+                        seconds: expires_at.timestamp(),
+                        nanos: expires_at.timestamp_subsec_nanos() as i32,
+                    }),
+                    success: true,
+                    error_message: String::new(),
+                }))
+            }
+            Err(e) => {
+                self.metrics.increment_grpc_request("create_lease", "error");
+                error!("Failed to create lease: {}", e);
                 Err(Status::from(e))
             }
         }
@@ -458,30 +150,72 @@ impl crate::proto::distributed_gc_service_server::DistributedGcService for GCSer
         &self,
         request: Request<RenewLeaseRequest>,
     ) -> std::result::Result<Response<RenewLeaseResponse>, Status> {
-        let start = Instant::now();
         let req = request.into_inner();
-        let lease_id = req.lease_id.clone();
+        let start_time = std::time::Instant::now();
 
-        let result = self.renew_lease_impl(req).await;
-        let duration = start.elapsed().as_secs_f64();
+        debug!("Renewing lease: {}", req.lease_id);
 
-        match result {
-            Ok(response) => {
-                self.metrics
-                    .record_request("renew_lease", "success", duration);
-                Ok(Response::new(response))
+        // Get existing lease
+        let mut lease = match self.storage.get_lease(&req.lease_id).await {
+            Ok(Some(lease)) => lease,
+            Ok(None) => {
+                self.metrics.increment_grpc_request("renew_lease", "not_found");
+                return Err(Status::not_found("Lease not found"));
             }
             Err(e) => {
-                self.metrics
-                    .record_request("renew_lease", "error", duration);
-                error!(lease_id = %lease_id, error = %e, "Failed to renew lease");
+                self.metrics.increment_grpc_request("renew_lease", "error");
+                return Err(Status::from(e));
+            }
+        };
 
-                let response = RenewLeaseResponse {
-                    new_expires_at: None,
-                    success: false,
-                    error_message: e.to_string(),
-                };
-                Ok(Response::new(response))
+        // Verify service ownership
+        if lease.service_id != req.service_id {
+            self.metrics.increment_grpc_request("renew_lease", "unauthorized");
+            return Err(Status::permission_denied("Unauthorized access to lease"));
+        }
+
+        // Check if lease is still active
+        if lease.state != LeaseState::Active {
+            self.metrics.increment_grpc_request("renew_lease", "invalid_state");
+            return Err(Status::failed_precondition("Lease is not active"));
+        }
+
+        // Renew the lease
+        match lease.renew(std::time::Duration::from_secs(req.extend_duration_seconds)) {
+            Ok(_) => {
+                let new_expires_at = lease.expires_at;
+
+                // Update in storage
+                match self.storage.update_lease(lease).await {
+                    Ok(_) => {
+                        self.metrics.increment_leases_renewed();
+                        
+                        let duration = start_time.elapsed();
+                        self.metrics.record_grpc_request_duration("renew_lease", duration);
+                        self.metrics.increment_grpc_request("renew_lease", "success");
+
+                        info!("✅ Renewed lease {} for service {}", req.lease_id, req.service_id);
+
+                        Ok(Response::new(RenewLeaseResponse {
+                            new_expires_at: Some(prost_types::Timestamp {
+                                seconds: new_expires_at.timestamp(),
+                                nanos: new_expires_at.timestamp_subsec_nanos() as i32,
+                            }),
+                            success: true,
+                            error_message: String::new(),
+                        }))
+                    }
+                    Err(e) => {
+                        self.metrics.increment_grpc_request("renew_lease", "error");
+                        error!("Failed to update renewed lease: {}", e);
+                        Err(Status::from(e))
+                    }
+                }
+            }
+            Err(e) => {
+                self.metrics.increment_grpc_request("renew_lease", "error");
+                error!("Failed to renew lease: {}", e);
+                Err(Status::from(e))
             }
         }
     }
@@ -490,29 +224,51 @@ impl crate::proto::distributed_gc_service_server::DistributedGcService for GCSer
         &self,
         request: Request<ReleaseLeaseRequest>,
     ) -> std::result::Result<Response<ReleaseLeaseResponse>, Status> {
-        let start = Instant::now();
         let req = request.into_inner();
-        let lease_id = req.lease_id.clone();
+        let start_time = std::time::Instant::now();
 
-        let result = self.release_lease_impl(req).await;
-        let duration = start.elapsed().as_secs_f64();
+        debug!("Releasing lease: {}", req.lease_id);
 
-        match result {
-            Ok(response) => {
-                self.metrics
-                    .record_request("release_lease", "success", duration);
-                Ok(Response::new(response))
+        // Get existing lease
+        let lease = match self.storage.get_lease(&req.lease_id).await {
+            Ok(Some(lease)) => lease,
+            Ok(None) => {
+                self.metrics.increment_grpc_request("release_lease", "not_found");
+                return Err(Status::not_found("Lease not found"));
             }
             Err(e) => {
-                self.metrics
-                    .record_request("release_lease", "error", duration);
-                error!(lease_id = %lease_id, error = %e, "Failed to release lease");
+                self.metrics.increment_grpc_request("release_lease", "error");
+                return Err(Status::from(e));
+            }
+        };
 
-                let response = ReleaseLeaseResponse {
-                    success: false,
-                    error_message: e.to_string(),
-                };
-                Ok(Response::new(response))
+        // Verify service ownership
+        if lease.service_id != req.service_id {
+            self.metrics.increment_grpc_request("release_lease", "unauthorized");
+            return Err(Status::permission_denied("Unauthorized access to lease"));
+        }
+
+        // Mark lease as released
+        match self.storage.mark_lease_released(&req.lease_id).await {
+            Ok(_) => {
+                self.metrics.increment_leases_released();
+                self.metrics.decrement_active_leases();
+                
+                let duration = start_time.elapsed();
+                self.metrics.record_grpc_request_duration("release_lease", duration);
+                self.metrics.increment_grpc_request("release_lease", "success");
+
+                info!("✅ Released lease {} for service {}", req.lease_id, req.service_id);
+
+                Ok(Response::new(ReleaseLeaseResponse {
+                    success: true,
+                    error_message: String::new(),
+                }))
+            }
+            Err(e) => {
+                self.metrics.increment_grpc_request("release_lease", "error");
+                error!("Failed to release lease: {}", e);
+                Err(Status::from(e))
             }
         }
     }
@@ -521,21 +277,35 @@ impl crate::proto::distributed_gc_service_server::DistributedGcService for GCSer
         &self,
         request: Request<GetLeaseRequest>,
     ) -> std::result::Result<Response<GetLeaseResponse>, Status> {
-        let start = Instant::now();
         let req = request.into_inner();
+        let start_time = std::time::Instant::now();
 
-        let result = self.get_lease_impl(req).await;
-        let duration = start.elapsed().as_secs_f64();
+        debug!("Getting lease: {}", req.lease_id);
 
-        match result {
-            Ok(response) => {
-                self.metrics
-                    .record_request("get_lease", "success", duration);
-                Ok(Response::new(response))
+        match self.storage.get_lease(&req.lease_id).await {
+            Ok(Some(lease)) => {
+                let duration = start_time.elapsed();
+                self.metrics.record_grpc_request_duration("get_lease", duration);
+                self.metrics.increment_grpc_request("get_lease", "success");
+
+                Ok(Response::new(GetLeaseResponse {
+                    lease: Some((&lease).into()),
+                    found: true,
+                }))
+            }
+            Ok(None) => {
+                let duration = start_time.elapsed();
+                self.metrics.record_grpc_request_duration("get_lease", duration);
+                self.metrics.increment_grpc_request("get_lease", "not_found");
+
+                Ok(Response::new(GetLeaseResponse {
+                    lease: None,
+                    found: false,
+                }))
             }
             Err(e) => {
-                self.metrics.record_request("get_lease", "error", duration);
-                error!(error = %e, "Failed to get lease");
+                self.metrics.increment_grpc_request("get_lease", "error");
+                error!("Failed to get lease: {}", e);
                 Err(Status::from(e))
             }
         }
@@ -545,22 +315,52 @@ impl crate::proto::distributed_gc_service_server::DistributedGcService for GCSer
         &self,
         request: Request<ListLeasesRequest>,
     ) -> std::result::Result<Response<ListLeasesResponse>, Status> {
-        let start = Instant::now();
         let req = request.into_inner();
+        let start_time = std::time::Instant::now();
 
-        let result = self.list_leases_impl(req).await;
-        let duration = start.elapsed().as_secs_f64();
+        debug!("Listing leases with filter");
 
-        match result {
-            Ok(response) => {
-                self.metrics
-                    .record_request("list_leases", "success", duration);
-                Ok(Response::new(response))
+        // Build filter
+        let mut filter = LeaseFilter::default();
+        
+        if !req.service_id.is_empty() {
+            filter.service_id = Some(req.service_id);
+        }
+        
+        if req.object_type != 0 {
+            if let Ok(object_type) = ObjectType::try_from(req.object_type) {
+                filter.object_type = Some(object_type);
+            }
+        }
+        
+        if req.state != 0 {
+            if let Ok(state) = LeaseState::try_from(req.state) {
+                filter.state = Some(state);
+            }
+        }
+
+        let limit = if req.limit > 0 { Some(req.limit as usize) } else { None };
+
+        // FIXED: Use Some(filter) instead of filter, and remove offset parameter
+        match self.storage.list_leases(Some(filter), limit).await {
+            Ok(leases) => {
+                let lease_infos: Vec<LeaseInfo> = leases
+                    .iter()
+                    .map(|lease| lease.into())
+                    .collect();
+
+                let duration = start_time.elapsed();
+                self.metrics.record_grpc_request_duration("list_leases", duration);
+                self.metrics.increment_grpc_request("list_leases", "success");
+
+                Ok(Response::new(ListLeasesResponse {
+                    leases: lease_infos,
+                    next_page_token: String::new(), // No pagination support in simplified version
+                }))
             }
             Err(e) => {
-                self.metrics
-                    .record_request("list_leases", "error", duration);
-                error!(error = %e, "Failed to list leases");
+                self.metrics.increment_grpc_request("list_leases", "error");
+                error!("Failed to list leases: {}", e);
                 Err(Status::from(e))
             }
         }
@@ -568,24 +368,31 @@ impl crate::proto::distributed_gc_service_server::DistributedGcService for GCSer
 
     async fn health_check(
         &self,
-        request: Request<HealthCheckRequest>,
+        _request: Request<HealthCheckRequest>,
     ) -> std::result::Result<Response<HealthCheckResponse>, Status> {
-        let start = Instant::now();
-        let req = request.into_inner();
+        let start_time = std::time::Instant::now();
 
-        let result = self.health_check_impl(req).await;
-        let duration = start.elapsed().as_secs_f64();
+        debug!("Health check requested");
 
-        match result {
-            Ok(response) => {
-                self.metrics
-                    .record_request("health_check", "success", duration);
-                Ok(Response::new(response))
+        match self.storage.health_check().await {
+            Ok(healthy) => {
+                let stats = self.storage.get_stats().await.unwrap_or_default();
+                
+                let duration = start_time.elapsed();
+                self.metrics.record_grpc_request_duration("health_check", duration);
+                self.metrics.increment_grpc_request("health_check", "success");
+
+                Ok(Response::new(HealthCheckResponse {
+                    healthy,
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    active_leases: stats.active_leases as u64,
+                    expired_leases: stats.expired_leases as u64,
+                    uptime: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
+                }))
             }
             Err(e) => {
-                self.metrics
-                    .record_request("health_check", "error", duration);
-                error!(error = %e, "Health check failed");
+                self.metrics.increment_grpc_request("health_check", "error");
+                error!("Health check failed: {}", e);
                 Err(Status::from(e))
             }
         }
@@ -593,26 +400,100 @@ impl crate::proto::distributed_gc_service_server::DistributedGcService for GCSer
 
     async fn get_metrics(
         &self,
-        request: Request<MetricsRequest>,
+        _request: Request<MetricsRequest>,
     ) -> std::result::Result<Response<MetricsResponse>, Status> {
-        let start = Instant::now();
-        let req = request.into_inner();
+        let start_time = std::time::Instant::now();
 
-        let result = self.get_metrics_impl(req).await;
-        let duration = start.elapsed().as_secs_f64();
+        debug!("Metrics requested");
 
-        match result {
-            Ok(response) => {
-                self.metrics
-                    .record_request("get_metrics", "success", duration);
-                Ok(Response::new(response))
+        match self.storage.get_stats().await {
+            Ok(stats) => {
+                let duration = start_time.elapsed();
+                self.metrics.record_grpc_request_duration("get_metrics", duration);
+                self.metrics.increment_grpc_request("get_metrics", "success");
+
+                Ok(Response::new(MetricsResponse {
+                    total_leases_created: self.metrics.leases_created_total.get() as u64,
+                    total_leases_renewed: self.metrics.leases_renewed_total.get() as u64,
+                    total_leases_expired: self.metrics.leases_expired_total.get() as u64,
+                    total_leases_released: self.metrics.leases_released_total.get() as u64,
+                    total_cleanup_operations: self.metrics.cleanup_operations_total.get() as u64,
+                    failed_cleanup_operations: self.metrics.cleanup_failures_total.get() as u64,
+                    active_leases: stats.active_leases as u64,
+                    leases_by_service: stats.leases_by_service.into_iter()
+                        .map(|(k, v)| (k, v as u64))
+                        .collect(),
+                    leases_by_type: stats.leases_by_type.into_iter()
+                        .map(|(k, v)| (k, v as u64))
+                        .collect(),
+                }))
             }
             Err(e) => {
-                self.metrics
-                    .record_request("get_metrics", "error", duration);
-                error!(error = %e, "Failed to get metrics");
+                self.metrics.increment_grpc_request("get_metrics", "error");
+                error!("Failed to get metrics: {}", e);
                 Err(Status::from(e))
             }
         }
+    }
+}
+
+// Helper implementations for type conversions
+impl TryFrom<i32> for ObjectType {
+    type Error = ();
+
+    fn try_from(value: i32) -> std::result::Result<Self, Self::Error> {
+        match value {
+            0 => Ok(ObjectType::Unknown),
+            1 => Ok(ObjectType::DatabaseRow),
+            2 => Ok(ObjectType::BlobStorage),
+            3 => Ok(ObjectType::TemporaryFile),
+            4 => Ok(ObjectType::WebsocketSession),
+            5 => Ok(ObjectType::CacheEntry),
+            6 => Ok(ObjectType::Custom),
+            _ => Err(()),
+        }
+    }
+}
+
+impl TryFrom<i32> for LeaseState {
+    type Error = ();
+
+    fn try_from(value: i32) -> std::result::Result<Self, Self::Error> {
+        match value {
+            0 => Ok(LeaseState::Active),
+            1 => Ok(LeaseState::Expired),
+            2 => Ok(LeaseState::Released),
+            _ => Err(()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::MemoryStorage;
+
+    #[tokio::test]
+    async fn test_handlers_creation() {
+        let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+        let config = Arc::new(Config::default());
+        let metrics = Metrics::new();
+
+        let _handlers = GCServiceHandlers::new(storage, config, metrics);
+        // Test passes if we can create handlers without panicking
+    }
+
+    #[tokio::test]
+    async fn test_health_check() {
+        let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+        let config = Arc::new(Config::default());
+        let metrics = Metrics::new();
+
+        let handlers = GCServiceHandlers::new(storage, config, metrics);
+        
+        let request = Request::new(HealthCheckRequest {});
+        let response = handlers.health_check(request).await.unwrap();
+        
+        assert!(response.into_inner().healthy);
     }
 }

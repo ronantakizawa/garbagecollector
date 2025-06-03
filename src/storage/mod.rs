@@ -1,239 +1,161 @@
-// src/storage/mod.rs - Storage module with proper exports and syntax
+// src/storage/mod.rs - Updated Storage trait with count_leases method
 
 use async_trait::async_trait;
 use std::sync::Arc;
 
 use crate::config::Config;
 use crate::error::{GCError, Result};
-use crate::lease::{Lease, LeaseFilter, LeaseStats};
+use crate::lease::{Lease, LeaseFilter, LeaseStats, ObjectType};
 
-// Import storage implementations
-pub mod memory;
+mod memory;
 
-#[cfg(feature = "postgres")]
-pub mod postgres;
-
-// Re-export the implementations
 pub use memory::MemoryStorage;
 
-#[cfg(feature = "postgres")]
-pub use postgres::PostgresStorage;
-
-/// Core storage trait that all storage backends must implement
+/// Main storage trait for lease persistence
 #[async_trait]
 pub trait Storage: Send + Sync {
+    /// Create a new lease
     async fn create_lease(&self, lease: Lease) -> Result<()>;
+
+    /// Get a lease by ID
     async fn get_lease(&self, lease_id: &str) -> Result<Option<Lease>>;
+
+    /// Update an existing lease
     async fn update_lease(&self, lease: Lease) -> Result<()>;
+
+    /// Delete a lease
     async fn delete_lease(&self, lease_id: &str) -> Result<()>;
-    async fn list_leases(
-        &self,
-        filter: LeaseFilter,
-        limit: Option<usize>,
-        offset: Option<usize>,
-    ) -> Result<Vec<Lease>>;
+
+    /// List leases with optional filtering
+    async fn list_leases(&self, filter: Option<LeaseFilter>, limit: Option<usize>) -> Result<Vec<Lease>>;
+
+    /// Count leases matching the given filter
     async fn count_leases(&self, filter: LeaseFilter) -> Result<usize>;
+
+    /// Get expired leases that need cleanup
     async fn get_expired_leases(&self, grace_period: std::time::Duration) -> Result<Vec<Lease>>;
+
+    /// Get leases by service ID
+    async fn get_leases_by_service(&self, service_id: &str) -> Result<Vec<Lease>>;
+
+    /// Get leases by object type
+    async fn get_leases_by_type(&self, object_type: ObjectType) -> Result<Vec<Lease>>;
+
+    /// Get lease statistics
     async fn get_stats(&self) -> Result<LeaseStats>;
-    async fn cleanup(&self) -> Result<()>;
+
+    /// Health check
+    async fn health_check(&self) -> Result<bool>;
+
+    /// Cleanup expired leases (maintenance operation)
+    async fn cleanup(&self) -> Result<usize>;
+
+    /// Count active leases for a service (for rate limiting)
+    async fn count_active_leases_for_service(&self, service_id: &str) -> Result<usize>;
+
+    /// Mark lease as expired
+    async fn mark_lease_expired(&self, lease_id: &str) -> Result<()>;
+
+    /// Mark lease as released
+    async fn mark_lease_released(&self, lease_id: &str) -> Result<()>;
 }
 
-/// Extended storage trait for additional features (optional)
-#[async_trait]
-pub trait ExtendedStorage: Storage {
-    async fn get_info(&self) -> Result<StorageInfo>;
-    async fn migrate(&self) -> Result<()>;
-    async fn create_indexes(&self) -> Result<()>;
-    async fn get_detailed_stats(&self) -> Result<DetailedStorageStats>;
-}
-
-/// Storage backend information
-#[derive(Debug, Clone)]
-pub struct StorageInfo {
-    pub backend_type: String,
-    pub version: String,
-    pub supports_transactions: bool,
-    pub supports_indexes: bool,
-    pub estimated_size_bytes: Option<u64>,
-}
-
-impl StorageInfo {
-    pub fn memory() -> Self {
-        Self {
-            backend_type: "memory".to_string(),
-            version: "1.0".to_string(),
-            supports_transactions: false,
-            supports_indexes: false,
-            estimated_size_bytes: None,
-        }
-    }
-
-    #[cfg(feature = "postgres")]
-    pub fn postgres(version: String) -> Self {
-        Self {
-            backend_type: "postgres".to_string(),
-            version,
-            supports_transactions: true,
-            supports_indexes: true,
-            estimated_size_bytes: None,
-        }
-    }
-}
-
-/// Detailed storage statistics
-#[derive(Debug, Clone)]
-pub struct DetailedStorageStats {
-    pub total_storage_size_bytes: Option<u64>,
-    pub index_size_bytes: Option<u64>,
-    pub connection_pool_stats: Option<ConnectionPoolStats>,
-    pub query_performance: Option<QueryPerformanceStats>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ConnectionPoolStats {
-    pub total_connections: u32,
-    pub active_connections: u32,
-    pub idle_connections: u32,
-    pub max_connections: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct QueryPerformanceStats {
-    pub average_query_time_ms: f64,
-    pub slowest_query_time_ms: u64,
-    pub total_queries: u64,
-    pub failed_queries: u64,
-}
-
-/// Factory function to create storage backends based on configuration
-pub async fn create_storage(config: &Config) -> Result<Arc<dyn Storage + Send + Sync>> {
+/// Create storage backend based on configuration
+pub async fn create_storage(config: &Config) -> Result<Arc<dyn Storage>> {
     match config.storage.backend.as_str() {
         "memory" => {
-            let storage = MemoryStorage::new();
-            Ok(Arc::new(storage))
+            tracing::info!("🧠 Creating in-memory storage backend");
+            Ok(Arc::new(MemoryStorage::new()))
         }
-        #[cfg(feature = "postgres")]
-        "postgres" => {
-            let database_url = config.storage.database_url.as_ref().ok_or_else(|| {
-                GCError::Configuration("Database URL required for postgres backend".to_string())
-            })?;
-            let max_connections = config.storage.max_connections.unwrap_or(10);
-
-            let storage = PostgresStorage::new(database_url, max_connections)
-                .await
-                .map_err(|e| {
-                    GCError::Configuration(format!("Failed to create PostgreSQL storage: {}", e))
-                })?;
-            Ok(Arc::new(storage))
+        backend => {
+            tracing::error!("❌ Unsupported storage backend: {}", backend);
+            Err(GCError::Configuration(format!(
+                "Unsupported storage backend: {}. Only 'memory' is supported.",
+                backend
+            )))
         }
-        #[cfg(not(feature = "postgres"))]
-        "postgres" => Err(GCError::Configuration(
-            "Postgres support not compiled in. Enable 'postgres' feature.".to_string(),
-        )),
-        backend => Err(GCError::Configuration(format!(
-            "Unknown storage backend: {}",
-            backend
-        ))),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lease::{ObjectType, LeaseFilter};
+    use std::collections::HashMap;
 
-    #[tokio::test]
-    async fn test_create_memory_storage() {
-        let mut config = Config::default();
-        config.storage.backend = "memory".to_string();
-
-        let result = create_storage(&config).await;
-        assert!(result.is_ok(), "Should create memory storage successfully");
-
-        let storage = result.unwrap();
-
-        // Test basic functionality
-        let lease = Lease::new(
-            "test".to_string(),
-            crate::lease::ObjectType::DatabaseRow,
-            "service".to_string(),
+    async fn test_storage_backend(storage: Arc<dyn Storage>) {
+        // Test basic CRUD operations
+        let lease = crate::lease::Lease::new(
+            "test-object".to_string(),
+            ObjectType::TemporaryFile,
+            "test-service".to_string(),
             std::time::Duration::from_secs(300),
-            std::collections::HashMap::new(),
+            HashMap::new(),
             None,
         );
+
         let lease_id = lease.lease_id.clone();
 
-        storage.create_lease(lease).await.unwrap();
+        // Create lease
+        storage.create_lease(lease.clone()).await.unwrap();
+
+        // Get lease
         let retrieved = storage.get_lease(&lease_id).await.unwrap();
-        assert!(retrieved.is_some(), "Should retrieve created lease");
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().lease_id, lease_id);
+
+        // List leases
+        let leases = storage.list_leases(None, None).await.unwrap();
+        assert_eq!(leases.len(), 1);
+
+        // Count leases
+        let filter = LeaseFilter::default();
+        let count = storage.count_leases(filter).await.unwrap();
+        assert_eq!(count, 1);
+
+        // Delete lease
+        storage.delete_lease(&lease_id).await.unwrap();
+
+        // Verify deletion
+        let deleted = storage.get_lease(&lease_id).await.unwrap();
+        assert!(deleted.is_none());
     }
 
     #[tokio::test]
-    async fn test_unknown_storage_backend() {
-        let mut config = Config::default();
-        config.storage.backend = "unknown-backend".to_string();
-
-        let result = create_storage(&config).await;
-        assert!(result.is_err(), "Should fail for unknown backend");
-
-        match result {
-            Err(e) => {
-                assert!(
-                    e.to_string().contains("Unknown storage backend"),
-                    "Error should mention unknown backend: {}",
-                    e
-                );
-            }
-            Ok(_) => panic!("Expected error for unknown backend"),
-        }
+    async fn test_memory_storage() {
+        let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+        test_storage_backend(storage).await;
     }
 
-    #[cfg(feature = "postgres")]
     #[tokio::test]
-    async fn test_postgres_without_url() {
-        let mut config = Config::default();
-        config.storage.backend = "postgres".to_string();
-        config.storage.database_url = None; // Missing URL
+    async fn test_storage_factory() {
+        let config = crate::config::Config {
+            storage: crate::config::StorageConfig {
+                backend: "memory".to_string(),
+            },
+            ..Default::default()
+        };
 
-        let result = create_storage(&config).await;
-        assert!(
-            result.is_err(),
-            "Should fail when postgres backend selected but no URL provided"
-        );
-
-        match result {
-            Err(e) => {
-                let error_msg = e.to_string();
-                assert!(
-                    error_msg.contains("Database URL required"),
-                    "Error should mention missing URL: {}",
-                    error_msg
-                );
-            }
-            Ok(_) => panic!("Expected error for missing postgres URL"),
-        }
+        let storage = create_storage(&config).await.unwrap();
+        test_storage_backend(storage).await;
     }
 
-    #[cfg(not(feature = "postgres"))]
     #[tokio::test]
-    async fn test_postgres_feature_disabled() {
-        let mut config = Config::default();
-        config.storage.backend = "postgres".to_string();
+    async fn test_unsupported_backend() {
+        let config = crate::config::Config {
+            storage: crate::config::StorageConfig {
+                backend: "postgres".to_string(),
+            },
+            ..Default::default()
+        };
 
         let result = create_storage(&config).await;
-        assert!(
-            result.is_err(),
-            "Should fail when postgres feature is disabled"
-        );
-
-        match result {
-            Err(e) => {
-                assert!(
-                    e.to_string().contains("Postgres support not compiled in"),
-                    "Error should mention missing feature: {}",
-                    e
-                );
-            }
-            Ok(_) => panic!("Expected error for disabled postgres feature"),
+        assert!(result.is_err());
+        
+        if let Err(GCError::Configuration(msg)) = result {
+            assert!(msg.contains("Unsupported storage backend"));
+        } else {
+            panic!("Expected configuration error");
         }
     }
 }
