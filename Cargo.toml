@@ -1,6 +1,6 @@
 [package]
 name = "garbagetruck"  
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Ronan Takizawa <ronantakizawa@gmail.com>"]
 description = "A lease-based garbage collection sidecar for distributed systems"
