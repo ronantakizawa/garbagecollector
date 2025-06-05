@@ -47,20 +47,34 @@ User uploads a file → Service receives a 1-hour lease → Service crashes → 
 
 ### Installation
 
-1. **Clone and build the project**
+1. **Add GarbageTruck to your project**
 ```bash
-git clone <repository-url>
+# For using the client library in your application
+cargo add garbagetruck
+
+# For CLI tools only
+cargo install garbagetruck --features client
+
+# For server deployment  
+cargo install garbagetruck --features "client,server"
+```
+
+Or add to your Cargo.toml:
+```toml
+[dependencies]
+garbagetruck = "0.1.0"
+```
+
+2. **Start the server locally**
+```bash
+garbagetruck-server
+```
+
+3. **Start the service via Docker-Compose (Includes Prometheus, and Grafana Support)**
+```bash
+git clone https://github.com/ronantakizawa/garbagetruck.git
 cd garbagetruck
-cargo build --release
-```
-
-2. **Start the service locally**
-```bash
-cargo run --bin garbagetruck-server 
-```
-
-3. **Start the service via Docker-Compose (Includes PostgreSQL, Prometheus, and Grafana Support)**
-```bash
+cargo build --release --features "client,server"
 docker-compose up --build
 ```
 
@@ -68,11 +82,6 @@ docker-compose up --build
 
 ### 1. Install CLI (Mac / Linux)
 ```bash
-cargo build --release --bin garbagetruck --features client
-mkdir -p ~/.local/bin
-cp target/release/garbagetruck ~/.local/bin/
-chmod +x ~/.local/bin/garbagetruck
-echo 'export PATH="$PATH:$HOME/.local/bin"' >> ~/.bashrc && source ~/.bashrc
 garbagetruck --help
 ```
 ### 2. Run gRPC Health Check
@@ -94,63 +103,12 @@ garbagetruck lease list --service my-service --limit 20
 
 ### 1. Start server
 ```bash
-cargo build
-cargo run --bin garbagetruck-server
+garbagetruck-server
 ```
 
 ### 2. Run gRPC Tests
 ```bash
 cargo test --features grpc
-```
-
-## PostgreSQL Functionality Testing 
-
-### 1. Start server
-```bash
-cargo build
-RUST_LOG=debug ./target/release/garbagetruck
-```
-
-### 2. Start a Test Postgres Database (via Docker)
-
-Start a local Postgres instance (if you don’t have one running already):
-
-```bash
-docker run --name sqlx-test-db \
-  -e POSTGRES_USER=testuser \
-  -e POSTGRES_PASSWORD=testpass \
-  -e POSTGRES_DB=testdb \
-  -p 5432:5432 \
-  -d postgres:16
-```
-
-### 3. Set the Database URL
-
-Export the database URL for use by tests:
-
-```bash
-export DATABASE_URL=postgres://testuser:testpass@localhost:5432/testdb
-```
-
-### 4. Apply the Schema Using Docker
-
-Run migrations directly inside your running container:
-
-```bash
-docker exec -i sqlx-test-db psql -U testuser -d testdb < migrations/001_initial.sql
-```
-
-### 5. Run the Test 
-
-```bash
-cargo test
-```
-
-### 6. Reset the database
-```bash
-docker exec -it sqlx-test-db psql -U testuser -d postgres -c 'DROP DATABASE IF EXISTS testdb;'
-docker exec -it sqlx-test-db psql -U testuser -d postgres -c 'CREATE DATABASE testdb;'
-psql $DATABASE_URL -f migrations/001_initial.sql
 ```
 
 ## 📄 License

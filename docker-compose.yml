@@ -1,35 +1,4 @@
 services:
-  postgres:
-    image: postgres:16
-    container_name: gc_postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: testuser
-      POSTGRES_PASSWORD: testpass
-      POSTGRES_DB: testdb
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    command: >
-      bash -c "
-        docker-entrypoint.sh postgres &
-        pid=$!;
-        # Wait for PostgreSQL to accept connections
-        for i in {1..30}; do
-          pg_isready -U testuser -d postgres && break;
-          sleep 1;
-        done;
-        # Create the 'testuser' database if it doesn't exist
-        psql -U testuser -d postgres -c 'CREATE DATABASE testuser;' || true;
-        wait $pid
-      "
-
   garbagetruck-server:
     build:
       context: .
