@@ -94,4 +94,9 @@
 - **`schema.rs`** – Database schema integrity tests (table structure, constraints, indexes)  
 - **`triggers.rs`** – Database trigger functionality tests (automatic statistics updates, state transitions)  
 - **`functions.rs`** – Database function tests (stored procedures, statistics calculations, cleanup operations)  
-- **`performance.rs`** – Database performance and indexing tests (query optimization, concurrent access)  
+- **`performance.rs`** – Database performance and indexing tests (query optimization, concurrent access)
+
+## 🏗️ Architecture
+
+<img width="982" alt="Screenshot 2025-05-31 at 10 50 31 PM" src="https://github.com/user-attachments/assets/e1bd40ec-904c-4afe-9e16-1cd2a84e544a" />
+<img width="871" alt="Screenshot 2025-05-31 at 10 35 23 PM" src="https://github.com/user-attachments/assets/f2909eea-6660-4b4f-8c24-4224c1c0c8a6" />
