@@ -153,55 +153,6 @@ docker exec -it sqlx-test-db psql -U testuser -d postgres -c 'CREATE DATABASE te
 psql $DATABASE_URL -f migrations/001_initial.sql
 ```
 
-## 💸 Storage Cost Savings Experiment
-
-The experiment simulates a realistic distributed system where:
-
-- Jobs create temporary files (logs, uploads, processing artifacts)  
-- System failures occur at configurable rates (crashes, network issues)  
-- Files become orphaned without proper cleanup mechanisms  
-- **GarbageTruck** automatically recovers orphaned resources via lease expiration  
-
----
-
-### 📊 Results  
-**Catastrophic Failure Scenario (100% job crash rate)**
-
-#### 🚫 WITHOUT GARBAGETRUCK:
-- Files created: **200**  
-- Files cleaned: **0**  
-- Files orphaned: **200 (100.0%)**  
-- Storage used: **20000.00 MB (19.53 GB)**  
-- Monthly cost: **$0.4492**  
-- Cleanup efficiency: **0.0%**
-
-#### ✅ WITH GARBAGETRUCK:
-- Files created: **200**  
-- Files cleaned: **200**  
-- Files orphaned: **0 (0.0%)**  
-- Storage used: **0.00 MB (0.00 GB)**  
-- Monthly cost: **$0.0000**  
-- Cleanup efficiency: **100.0%**
-
-**💰 Result:**  
-**Assuming it costs $0.02 per GB /month:**
-- **Monthly cost savings:** `$0.4492`  
-- **Annual cost savings:** `$5.39`
-
----
-
-### 📈 Scale Projections
-
-Scale        | Jobs    | Orphaned Objects | Storage Saved | Annual Savings
--------------|---------|------------------|---------------|---------------
-Development  | 200     | 80               | 800MB         | $1.46
-Production   | 2,000   | 800              | 8GB           | $14.6
-Enterprise   | 20,000  | 8,000            | 80GB          | $146
-Hyperscale   | 200,000 | 80,000           | 800GB         | $1,460
-
----
-
-
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
