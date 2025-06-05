@@ -38,45 +38,6 @@ User uploads a file → Service receives a 1-hour lease → Service crashes → 
 - **Health Checks**: Built-in health monitoring and status reporting
 - **Graceful Degradation**: Continues operating even when some cleanups fail
 
-## 🏗️ Architecture
-
-<img width="982" alt="Screenshot 2025-05-31 at 10 50 31 PM" src="https://github.com/user-attachments/assets/e1bd40ec-904c-4afe-9e16-1cd2a84e544a" />
-<img width="871" alt="Screenshot 2025-05-31 at 10 35 23 PM" src="https://github.com/user-attachments/assets/f2909eea-6660-4b4f-8c24-4224c1c0c8a6" />
-
-
-
-## 📦 Use Cases 
-
-### 1. Cross-Service Object Lifecycle Management
-
-**Scenario**: Microservices (e.g., A, B, C) share object references (e.g., DB rows, blobs).  
-**Problem**: No centralized way to detect when an object is no longer needed.  
-**Solution**: Garbage Truck issues time-boxed leases. When all expire, the object is reclaimed automatically.
-
-### 2. Temporary Resource Cleanup
-
-**Scenario**: APIs or batch jobs generate temporary files or cache entries.  
-**Problem**: Orphaned resources accumulate and consume disk/memory.  
-**Solution**: Register objects with leases; Garbage Truck deletes them after expiration.
-
-### 3. Session and Connection Expiry
-
-**Scenario**: Applications maintain WebSocket or user sessions.  
-**Problem**: Sessions remain active after user disconnects or crashes.  
-**Solution**: Lease expires on inactivity, and the GC closes connections or cleans up session state.
-
-### 4. Database Row TTL Enforcement
-
-**Scenario**: Temporary data (e.g., carts, ephemeral records) stored in a database.  
-**Problem**: Old data persists without cleanup, bloating the DB.  
-**Solution**: Associate each row with a lease; expired leases trigger deletion.
-
-### 5. Blob/Object Storage Cleanup
-
-**Scenario**: Services upload files to S3, Azure Blob, etc.  
-**Problem**: No tracking of file usage lifecycle across services.  
-**Solution**: Attach leases to object IDs and clean up expired blobs automatically.
-
 ## 🚀 Quick Start
 
 ### Prerequisites
