@@ -31,13 +31,6 @@ User uploads a file → Service receives a 1-hour lease → Service crashes → 
 - Cache entries and in-memory objects
 - Custom resource types
 
-### Advanced Features
-- **Multi-backend Storage**: In-memory (development) and PostgreSQL
-- **Retry Logic**: Configurable retry policies for cleanup operations
-- **Metrics & Monitoring**: Prometheus metrics with comprehensive tracking
-- **Health Checks**: Built-in health monitoring and status reporting
-- **Graceful Degradation**: Continues operating even when some cleanups fail
-
 ## 🚀 Quick Start
 
 ### Prerequisites
