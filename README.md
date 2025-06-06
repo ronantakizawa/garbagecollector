@@ -17,9 +17,6 @@ User uploads a file → Processing service crashes → File remains forever
 User uploads a file → Service receives a 1-hour lease → Service crashes → File is auto-deleted after 1 hour  
 **Result:** Clean system, no orphaned resources
 
-![Screen-Recording-2025-06-06-at-10 12 27 AM](https://github.com/user-attachments/assets/30ad5745-a51e-48ca-8670-205359cfb361)
-
-
 ## 🚀 Quick Start
 
 ### Prerequisites
