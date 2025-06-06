@@ -17,19 +17,8 @@ User uploads a file → Processing service crashes → File remains forever
 User uploads a file → Service receives a 1-hour lease → Service crashes → File is auto-deleted after 1 hour  
 **Result:** Clean system, no orphaned resources
 
-## 🎯 Features
-- **Lease-Based GC**: Time-boxed leases for object references with automatic expiration
-- **Cross-Service Management**: Handle references between microservices safely
-- **Automatic Cleanup**: Configurable cleanup operations for different resource types
-- **High Performance**: Built with Rust for maximum performance and safety
+![Screen-Recording-2025-06-06-at-10 12 27 AM](https://github.com/user-attachments/assets/30ad5745-a51e-48ca-8670-205359cfb361)
 
-### Object Types Supported
-- Database rows and records
-- Blob storage objects (S3, Azure Blob, etc.)
-- Temporary files and cached data
-- WebSocket sessions and connections
-- Cache entries and in-memory objects
-- Custom resource types
 
 ## 🚀 Quick Start
 
