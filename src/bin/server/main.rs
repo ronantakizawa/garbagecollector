@@ -33,9 +33,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("📋 Configuration Summary:");
     info!("  Server endpoint: {}", summary.server_endpoint);
     info!("  Storage backend: {}", summary.storage_backend);
-    info!("  Default lease duration: {}s", summary.default_lease_duration);
+    info!(
+        "  Default lease duration: {}s",
+        summary.default_lease_duration
+    );
     info!("  Cleanup interval: {}s", summary.cleanup_interval);
-    info!("  Max leases per service: {}", summary.max_leases_per_service);
+    info!(
+        "  Max leases per service: {}",
+        summary.max_leases_per_service
+    );
     info!("  Metrics enabled: {}", summary.metrics_enabled);
     if let Some(port) = summary.metrics_port {
         info!("  Metrics port: {}", port);

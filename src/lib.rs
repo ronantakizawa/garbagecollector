@@ -1,3 +1,5 @@
+// src/lib.rs - Updated with correct exports
+
 pub mod cleanup;
 pub mod config;
 pub mod error;
@@ -27,7 +29,7 @@ pub mod proto {
 pub use config::Config;
 pub use error::{GCError, Result};
 pub use lease::{CleanupConfig, Lease, LeaseState, ObjectType};
-pub use service::{GCService, GCServiceHandlers};
+pub use service::GCService; // Removed GCServiceHandlers as it's private
 pub use shutdown::{
     ShutdownConfig, ShutdownCoordinator, ShutdownReason, TaskHandle, TaskPriority, TaskType,
 };
@@ -36,7 +38,7 @@ pub use storage::{create_storage, Storage};
 // Re-export startup
 pub use startup::ApplicationStartup;
 
-// Re-export metrics - FIXED: Export Metrics struct
+// Re-export metrics
 pub use metrics::Metrics;
 
 // Re-export client when feature is enabled

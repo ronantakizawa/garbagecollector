@@ -1,4 +1,4 @@
-// Update for src/client.rs - Fix mutability issues
+// src/client.rs - Fixed client with proper file path handling for cleanup
 
 use crate::error::{GCError, Result};
 use crate::lease::{CleanupConfig, ObjectType};
@@ -33,14 +33,14 @@ impl GCClient {
 
     /// Create a lease for an object
     pub async fn create_lease(
-        &self, // FIXED: Remove mut
+        &self,
         object_id: String,
         object_type: ObjectType,
         lease_duration_seconds: u64,
         metadata: HashMap<String, String>,
         cleanup_config: Option<CleanupConfig>,
     ) -> Result<String> {
-        let mut client = self.client.clone(); // Clone the client instead
+        let mut client = self.client.clone();
 
         let request = CreateLeaseRequest {
             object_id,
@@ -65,11 +65,7 @@ impl GCClient {
     }
 
     /// Renew an existing lease
-    pub async fn renew_lease(
-        &self, // FIXED: Remove mut
-        lease_id: String,
-        extend_duration_seconds: u64,
-    ) -> Result<()> {
+    pub async fn renew_lease(&self, lease_id: String, extend_duration_seconds: u64) -> Result<()> {
         let mut client = self.client.clone();
 
         let request = RenewLeaseRequest {
@@ -172,9 +168,9 @@ impl GCClient {
         Ok(health_response.healthy)
     }
 
-    // Convenience methods updated to not require mut
+    // FIXED: Convenience methods with proper file path handling
     pub async fn create_temp_file_lease(
-        &mut self,
+        &self,
         file_path: String,
         duration_seconds: u64,
         cleanup_endpoint: Option<String>,
@@ -182,11 +178,8 @@ impl GCClient {
         let cleanup_config = cleanup_endpoint.map(|endpoint| CleanupConfig {
             cleanup_endpoint: String::new(),
             cleanup_http_endpoint: endpoint,
-            // FIXED: Put file_path directly in the payload AND as a top-level field
-            cleanup_payload: format!(
-                r#"{{"action": "delete_file", "file_path": "{}"}}"#,
-                file_path
-            ),
+            // CRITICAL FIX: Send file_path as the main field AND in payload
+            cleanup_payload: format!(r#"{{"file_path": "{}"}}"#, file_path),
             max_retries: 3,
             retry_delay_seconds: 2,
         });
@@ -197,9 +190,9 @@ impl GCClient {
         ]
         .into();
 
-        // CRITICAL: Use the file_path as object_id so cleanup server can find it
+        // CRITICAL FIX: Use the file_path as object_id so cleanup server receives it
         self.create_lease(
-            file_path, // This becomes the object_id that gets sent to cleanup
+            file_path, // This becomes the object_id that gets sent to cleanup server
             ObjectType::TemporaryFile,
             duration_seconds,
             metadata,

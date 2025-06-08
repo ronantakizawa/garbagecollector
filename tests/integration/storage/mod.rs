@@ -13,7 +13,7 @@ pub mod memory;
 pub async fn create_test_storage() -> Result<std::sync::Arc<dyn Storage>> {
     let mut config = Config::default();
     config.storage.backend = "memory".to_string();
-    
+
     create_storage(&config)
         .await
         .map_err(|e| anyhow::anyhow!("Storage creation failed: {}", e))
@@ -43,7 +43,7 @@ mod tests {
     async fn test_create_test_storage_with_config() {
         let mut config = Config::default();
         config.storage.backend = "memory".to_string();
-        
+
         let storage = create_test_storage_with_config(config).await.unwrap();
         let healthy = storage.health_check().await.unwrap();
         assert!(healthy);

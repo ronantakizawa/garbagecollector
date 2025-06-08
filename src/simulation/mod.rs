@@ -1,82 +1,46 @@
-// src/simulation/mod.rs - Fixed simulation with working cleanup
+// src/simulation/mod.rs - Fixed simulation with proper cleanup integration
 
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::time::sleep;
-use tracing::{info, warn, error, debug};
-use uuid::Uuid;
+use tokio::fs;
+use tokio::time::{interval, sleep};
+use tracing::{debug, error, info, warn};
+use warp::Filter;
 
 use crate::client::GCClient;
+use crate::error::{GCError, Result};
 
-/// File simulation configuration
+/// Configuration for file simulation experiments
 #[derive(Debug, Clone)]
 pub struct FileSimulationConfig {
     pub base_directory: PathBuf,
     pub file_size_bytes: usize,
     pub job_count: u32,
     pub job_duration_seconds: u64,
-    pub crash_probability: f32, // 0.0 to 1.0
+    pub crash_probability: f32,
     pub cleanup_endpoint: Option<String>,
 }
 
-/// Tracks storage costs and statistics
+/// Tracks storage costs and cleanup efficiency
 #[derive(Debug, Clone)]
 pub struct StorageCostTracker {
-    total_files_created: Arc<AtomicU64>,
-    total_files_cleaned: Arc<AtomicU64>,
-    total_bytes_created: Arc<AtomicU64>,
-    total_bytes_cleaned: Arc<AtomicU64>,
-    orphaned_files: Arc<AtomicU64>,
-    orphaned_bytes: Arc<AtomicU64>,
-    cost_per_gb_per_month: f64, // e.g., $0.023 for S3 Standard
+    inner: Arc<Mutex<StorageStatsInner>>,
+    pub cost_per_gb_per_month: f64,
 }
 
-impl StorageCostTracker {
-    pub fn new(cost_per_gb_per_month: f64) -> Self {
-        Self {
-            total_files_created: Arc::new(AtomicU64::new(0)),
-            total_files_cleaned: Arc::new(AtomicU64::new(0)),
-            total_bytes_created: Arc::new(AtomicU64::new(0)),
-            total_bytes_cleaned: Arc::new(AtomicU64::new(0)),
-            orphaned_files: Arc::new(AtomicU64::new(0)),
-            orphaned_bytes: Arc::new(AtomicU64::new(0)),
-            cost_per_gb_per_month,
-        }
-    }
-
-    pub fn file_created(&self, size_bytes: u64) {
-        self.total_files_created.fetch_add(1, Ordering::Relaxed);
-        self.total_bytes_created.fetch_add(size_bytes, Ordering::Relaxed);
-    }
-
-    pub fn file_cleaned(&self, size_bytes: u64) {
-        self.total_files_cleaned.fetch_add(1, Ordering::Relaxed);
-        self.total_bytes_cleaned.fetch_add(size_bytes, Ordering::Relaxed);
-    }
-
-    pub fn file_orphaned(&self, size_bytes: u64) {
-        self.orphaned_files.fetch_add(1, Ordering::Relaxed);
-        self.orphaned_bytes.fetch_add(size_bytes, Ordering::Relaxed);
-    }
-
-    pub fn get_stats(&self) -> StorageStats {
-        StorageStats {
-            total_files_created: self.total_files_created.load(Ordering::Relaxed),
-            total_files_cleaned: self.total_files_cleaned.load(Ordering::Relaxed),
-            total_bytes_created: self.total_bytes_created.load(Ordering::Relaxed),
-            total_bytes_cleaned: self.total_bytes_cleaned.load(Ordering::Relaxed),
-            orphaned_files: self.orphaned_files.load(Ordering::Relaxed),
-            orphaned_bytes: self.orphaned_bytes.load(Ordering::Relaxed),
-            cost_per_gb_per_month: self.cost_per_gb_per_month,
-        }
-    }
+#[derive(Debug, Clone)]
+struct StorageStatsInner {
+    pub total_files_created: u64,
+    pub total_files_cleaned: u64,
+    pub total_bytes_created: u64,
+    pub total_bytes_cleaned: u64,
+    pub orphaned_files: u64,
+    pub orphaned_bytes: u64,
 }
 
-/// Storage statistics snapshot
+/// Public storage statistics
 #[derive(Debug, Clone)]
 pub struct StorageStats {
     pub total_files_created: u64,
@@ -90,7 +54,8 @@ pub struct StorageStats {
 
 impl StorageStats {
     pub fn current_storage_bytes(&self) -> u64 {
-        self.total_bytes_created.saturating_sub(self.total_bytes_cleaned)
+        self.total_bytes_created
+            .saturating_sub(self.total_bytes_cleaned)
     }
 
     pub fn current_monthly_cost(&self) -> f64 {
@@ -105,220 +70,325 @@ impl StorageStats {
 
     pub fn cleanup_efficiency(&self) -> f64 {
         if self.total_files_created == 0 {
-            return 0.0;
+            return 100.0;
         }
         (self.total_files_cleaned as f64 / self.total_files_created as f64) * 100.0
     }
 }
 
-/// Simulates a job that creates temporary files
+impl StorageCostTracker {
+    pub fn new(cost_per_gb_per_month: f64) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(StorageStatsInner {
+                total_files_created: 0,
+                total_files_cleaned: 0,
+                total_bytes_created: 0,
+                total_bytes_cleaned: 0,
+                orphaned_files: 0,
+                orphaned_bytes: 0,
+            })),
+            cost_per_gb_per_month,
+        }
+    }
+
+    pub fn file_created(&self, size_bytes: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.total_files_created += 1;
+        inner.total_bytes_created += size_bytes;
+    }
+
+    pub fn file_cleaned(&self, size_bytes: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.total_files_cleaned += 1;
+        inner.total_bytes_cleaned += size_bytes;
+    }
+
+    pub fn file_orphaned(&self, size_bytes: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.orphaned_files += 1;
+        inner.orphaned_bytes += size_bytes;
+    }
+
+    pub fn get_stats(&self) -> StorageStats {
+        let inner = self.inner.lock().unwrap();
+        StorageStats {
+            total_files_created: inner.total_files_created,
+            total_files_cleaned: inner.total_files_cleaned,
+            total_bytes_created: inner.total_bytes_created,
+            total_bytes_cleaned: inner.total_bytes_cleaned,
+            orphaned_files: inner.orphaned_files,
+            orphaned_bytes: inner.orphaned_bytes,
+            cost_per_gb_per_month: self.cost_per_gb_per_month,
+        }
+    }
+}
+
+/// Simulates jobs that create temporary files
 pub struct JobSimulator {
     config: FileSimulationConfig,
     cost_tracker: StorageCostTracker,
     gc_client: Option<GCClient>,
-    active_files: HashMap<String, PathBuf>,
+    active_leases: Arc<Mutex<HashMap<String, String>>>, // file_path -> lease_id
 }
 
 impl JobSimulator {
     pub fn new(
-        config: FileSimulationConfig, 
+        config: FileSimulationConfig,
         cost_tracker: StorageCostTracker,
-        gc_client: Option<GCClient>
+        gc_client: Option<GCClient>,
     ) -> Self {
         Self {
             config,
             cost_tracker,
             gc_client,
-            active_files: HashMap::new(),
+            active_leases: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Run the experiment without GarbageTruck (files get orphaned)
-    pub async fn run_without_garbagetruck(&mut self) -> Result<StorageStats, Box<dyn std::error::Error + Send + Sync>> {
-        info!("🚫 Running experiment WITHOUT GarbageTruck");
-        info!("Files will be orphaned when jobs crash");
+    /// Run experiment without GarbageTruck (files will be orphaned when jobs crash)
+    pub async fn run_without_garbagetruck(&mut self) -> Result<StorageStats> {
+        info!("🚫 Running simulation WITHOUT GarbageTruck");
 
-        // Ensure base directory exists
-        fs::create_dir_all(&self.config.base_directory)?;
-
-        for job_id in 0..self.config.job_count {
-            self.simulate_job_without_gc(job_id).await?;
-            
-            // Small delay between jobs
-            sleep(Duration::from_millis(100)).await;
+        // Create base directory
+        if !self.config.base_directory.exists() {
+            fs::create_dir_all(&self.config.base_directory)
+                .await
+                .map_err(|e| GCError::Internal(format!("Failed to create directory: {}", e)))?;
         }
 
-        // Wait a bit for any pending operations
-        sleep(Duration::from_secs(2)).await;
-
-        Ok(self.cost_tracker.get_stats())
-    }
-
-    /// Run the experiment with GarbageTruck (files get cleaned up)
-    pub async fn run_with_garbagetruck(&mut self) -> Result<StorageStats, Box<dyn std::error::Error + Send + Sync>> {
-        info!("✅ Running experiment WITH GarbageTruck");
-        info!("Files will be automatically cleaned up when leases expire");
-
-        if self.gc_client.is_none() {
-            return Err("GarbageTruck client not configured".into());
-        }
-
-        // Ensure base directory exists
-        fs::create_dir_all(&self.config.base_directory)?;
+        let mut handles = Vec::new();
 
         for job_id in 0..self.config.job_count {
-            self.simulate_job_with_gc(job_id).await?;
-            
-            // Small delay between jobs
+            let config = self.config.clone();
+            let cost_tracker = self.cost_tracker.clone();
+
+            let handle = tokio::spawn(async move {
+                let file_path = config.base_directory.join(format!("job_{}.dat", job_id));
+
+                // Create file
+                let file_data = vec![0u8; config.file_size_bytes];
+                if let Err(e) = fs::write(&file_path, file_data).await {
+                    error!("Failed to create file {:?}: {}", file_path, e);
+                    return;
+                }
+
+                cost_tracker.file_created(config.file_size_bytes as u64);
+                debug!("Created file: {:?}", file_path);
+
+                // Simulate job work
+                sleep(Duration::from_secs(config.job_duration_seconds)).await;
+
+                // Simulate crash - don't clean up file
+                if fastrand::f32() < config.crash_probability {
+                    info!("💥 Job {} crashed - file will be orphaned", job_id);
+                    cost_tracker.file_orphaned(config.file_size_bytes as u64);
+                } else {
+                    // Job completed successfully - clean up file
+                    if let Err(e) = fs::remove_file(&file_path).await {
+                        warn!("Failed to clean up file {:?}: {}", file_path, e);
+                        cost_tracker.file_orphaned(config.file_size_bytes as u64);
+                    } else {
+                        cost_tracker.file_cleaned(config.file_size_bytes as u64);
+                        debug!("✅ Job {} completed - file cleaned up", job_id);
+                    }
+                }
+            });
+
+            handles.push(handle);
+
+            // Small delay between job starts
             sleep(Duration::from_millis(50)).await;
         }
 
-        // CRITICAL: Wait much longer for lease expirations and cleanup
-        info!("⏳ Waiting for lease expirations and cleanup to complete...");
-        info!("   This may take 30-60 seconds for all cleanups to process");
-        
-        // Wait in chunks and report progress
-        for i in 1..=6 {
-            sleep(Duration::from_secs(10)).await;
-            let (remaining_files, remaining_bytes) = self.count_remaining_files()?;
-            info!("   Progress check {}/6: {} files remaining ({:.1} MB)", 
-                  i, remaining_files, remaining_bytes as f64 / (1024.0 * 1024.0));
+        // Wait for all jobs to complete
+        for handle in handles {
+            if let Err(e) = handle.await {
+                error!("Job task failed: {}", e);
+            }
         }
 
+        info!("🚫 Simulation without GarbageTruck completed");
         Ok(self.cost_tracker.get_stats())
     }
 
-    async fn simulate_job_without_gc(&mut self, job_id: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let file_path = self.create_temporary_file(job_id)?;
-        
-        // Simulate job work
-        let should_crash = fastrand::f32() < self.config.crash_probability;
-        
-        if should_crash {
-            warn!("💥 Job {} crashed! File will be orphaned: {:?}", job_id, file_path);
-            // File is orphaned - track it
-            self.cost_tracker.file_orphaned(self.config.file_size_bytes as u64);
-        } else {
-            // Job completed successfully - clean up file
-            debug!("✅ Job {} completed successfully", job_id);
-            self.cleanup_file(&file_path)?;
-            self.cost_tracker.file_cleaned(self.config.file_size_bytes as u64);
+    /// Run experiment with GarbageTruck (files will be cleaned up when leases expire)
+    pub async fn run_with_garbagetruck(&mut self) -> Result<StorageStats> {
+        info!("✅ Running simulation WITH GarbageTruck");
+
+        let gc_client = self
+            .gc_client
+            .as_ref()
+            .ok_or_else(|| GCError::Internal("No GarbageTruck client provided".to_string()))?;
+
+        // Create base directory
+        if !self.config.base_directory.exists() {
+            fs::create_dir_all(&self.config.base_directory)
+                .await
+                .map_err(|e| GCError::Internal(format!("Failed to create directory: {}", e)))?;
         }
 
-        Ok(())
-    }
+        let mut handles = Vec::new();
 
-    async fn simulate_job_with_gc(&mut self, job_id: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let file_path = self.create_temporary_file(job_id)?;
-        let gc_client = self.gc_client.as_mut().unwrap();
-        
-        // FIXED: Create lease for the file with very short duration for fast cleanup
-        let lease_id = gc_client.create_temp_file_lease(
-            file_path.to_string_lossy().to_string(),
-            10, // 10 seconds - short enough to see results quickly
-            self.config.cleanup_endpoint.clone()
-        ).await?;
+        for job_id in 0..self.config.job_count {
+            let config = self.config.clone();
+            let cost_tracker = self.cost_tracker.clone();
+            let gc_client = gc_client.clone();
+            let active_leases = self.active_leases.clone();
 
-        debug!("📋 Created lease {} for file: {:?}", lease_id, file_path);
+            let handle = tokio::spawn(async move {
+                let file_path = config.base_directory.join(format!("job_{}.dat", job_id));
+                let file_path_str = file_path.to_string_lossy().to_string();
 
-        // Simulate job work
-        let should_crash = fastrand::f32() < self.config.crash_probability;
-        
-        if should_crash {
-            warn!("💥 Job {} crashed! But lease will handle cleanup: {:?}", job_id, file_path);
-            // Don't clean up manually - let the lease expire and handle it
-            // File should be cleaned up automatically by GarbageTruck
-        } else {
-            // Job completed successfully - release lease early and clean up manually
-            debug!("✅ Job {} completed successfully, releasing lease", job_id);
-            if let Err(e) = gc_client.release_lease(lease_id).await {
-                warn!("Failed to release lease: {}", e);
+                // Create file
+                let file_data = vec![0u8; config.file_size_bytes];
+                if let Err(e) = fs::write(&file_path, file_data).await {
+                    error!("Failed to create file {:?}: {}", file_path, e);
+                    return;
+                }
+
+                cost_tracker.file_created(config.file_size_bytes as u64);
+                debug!("Created file: {:?}", file_path);
+
+                // FIXED: Create lease with shorter duration for faster cleanup in experiments
+                let lease_duration = 20; // Use 20 seconds instead of longer duration
+                match gc_client
+                    .create_temp_file_lease(
+                        file_path_str.clone(),
+                        lease_duration,
+                        config.cleanup_endpoint.clone(),
+                    )
+                    .await
+                {
+                    Ok(lease_id) => {
+                        debug!("📋 Created lease {} for file: {:?}", lease_id, file_path);
+
+                        // Track active lease
+                        {
+                            let mut leases = active_leases.lock().unwrap();
+                            leases.insert(file_path_str.clone(), lease_id.clone());
+                        }
+
+                        // Simulate job work
+                        sleep(Duration::from_secs(config.job_duration_seconds)).await;
+
+                        // Simulate crash or success
+                        if fastrand::f32() < config.crash_probability {
+                            info!("💥 Job {} crashed - GarbageTruck will clean up via lease expiration", job_id);
+                            // Don't release lease - let it expire and trigger cleanup
+                        } else {
+                            // Job completed successfully - release lease explicitly
+                            if let Err(e) = gc_client.release_lease(lease_id.clone()).await {
+                                warn!("Failed to release lease {}: {}", lease_id, e);
+                            } else {
+                                debug!("✅ Job {} completed - lease released", job_id);
+                            }
+
+                            // Remove from active leases
+                            {
+                                let mut leases = active_leases.lock().unwrap();
+                                leases.remove(&file_path_str);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to create lease for file {:?}: {}", file_path, e);
+                        // Fallback: track as orphaned since we can't protect it
+                        cost_tracker.file_orphaned(config.file_size_bytes as u64);
+                    }
+                }
+            });
+
+            handles.push(handle);
+
+            // Small delay between job starts
+            sleep(Duration::from_millis(50)).await;
+        }
+
+        // Wait for all jobs to complete
+        for handle in handles {
+            if let Err(e) = handle.await {
+                error!("Job task failed: {}", e);
             }
-            // Clean up file manually since job succeeded
-            self.cleanup_file(&file_path)?;
-            self.cost_tracker.file_cleaned(self.config.file_size_bytes as u64);
         }
 
-        Ok(())
+        // Wait a bit for cleanup to happen
+        info!("⏳ Waiting for GarbageTruck cleanup to process expired leases...");
+        sleep(Duration::from_secs(5)).await;
+
+        info!("✅ Simulation with GarbageTruck completed");
+        Ok(self.cost_tracker.get_stats())
     }
 
-    fn create_temporary_file(&self, job_id: u32) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-        let filename = format!("temp_job_{}_{}.dat", job_id, Uuid::new_v4());
-        let file_path = self.config.base_directory.join(filename);
-
-        // Create file with specified size
-        let data = vec![0u8; self.config.file_size_bytes];
-        fs::write(&file_path, data)?;
-
-        self.cost_tracker.file_created(self.config.file_size_bytes as u64);
-        debug!("📁 Created temporary file: {:?} ({} bytes)", file_path, self.config.file_size_bytes);
-
-        Ok(file_path)
-    }
-
-    fn cleanup_file(&self, file_path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if file_path.exists() {
-            fs::remove_file(file_path)?;
-            debug!("🗑️  Cleaned up file: {:?}", file_path);
-        }
-        Ok(())
-    }
-
-    /// Count actual files remaining in the directory and update cost tracker
-    pub fn count_remaining_files(&self) -> Result<(u64, u64), Box<dyn std::error::Error + Send + Sync>> {
+    /// Count remaining files on disk
+    pub fn count_remaining_files(&self) -> Result<(u32, u64)> {
         let mut file_count = 0;
-        let mut total_size = 0;
+        let mut total_bytes = 0;
 
-        if self.config.base_directory.exists() {
-            for entry in fs::read_dir(&self.config.base_directory)? {
-                let entry = entry?;
-                if entry.file_type()?.is_file() {
-                    file_count += 1;
-                    total_size += entry.metadata()?.len();
+        if !self.config.base_directory.exists() {
+            return Ok((0, 0));
+        }
+
+        match std::fs::read_dir(&self.config.base_directory) {
+            Ok(entries) => {
+                for entry in entries {
+                    if let Ok(entry) = entry {
+                        if let Ok(metadata) = entry.metadata() {
+                            if metadata.is_file() {
+                                file_count += 1;
+                                total_bytes += metadata.len();
+                            }
+                        }
+                    }
                 }
             }
+            Err(e) => {
+                warn!(
+                    "Failed to read directory {:?}: {}",
+                    self.config.base_directory, e
+                );
+            }
         }
 
-        // CRITICAL: Update the cost tracker with actual remaining files
-        let stats = self.cost_tracker.get_stats();
-        let expected_cleaned = stats.total_files_created - file_count;
-        let expected_cleaned_bytes = expected_cleaned * self.config.file_size_bytes as u64;
-        
-        // Reset and update cleaned counts based on actual file system state
-        self.cost_tracker.total_files_cleaned.store(expected_cleaned, Ordering::Relaxed);
-        self.cost_tracker.total_bytes_cleaned.store(expected_cleaned_bytes, Ordering::Relaxed);
-
-        Ok((file_count, total_size))
+        Ok((file_count, total_bytes))
     }
 }
 
-/// Enhanced HTTP cleanup handler for file deletion with working integration
-pub async fn start_file_cleanup_server(port: u16, base_directory: PathBuf, cost_tracker: StorageCostTracker) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// Start a simple HTTP cleanup server for file deletion
+pub async fn start_file_cleanup_server(
+    port: u16,
+    base_directory: PathBuf,
+    cost_tracker: StorageCostTracker,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use warp::Filter;
-    
-    let cost_tracker = Arc::new(cost_tracker);
+
     let base_dir = Arc::new(base_directory);
-    
+    let cost_tracker = Arc::new(cost_tracker);
+
     let cleanup = warp::path("cleanup")
         .and(warp::post())
         .and(warp::body::json())
-        .and(warp::any().map(move || cost_tracker.clone()))
-        .and(warp::any().map(move || base_dir.clone()))
+        .and(warp::any().map({
+            let cost_tracker = cost_tracker.clone();
+            move || cost_tracker.clone()
+        }))
+        .and(warp::any().map({
+            let base_dir = base_dir.clone();
+            move || base_dir.clone()
+        }))
         .and_then(handle_cleanup_request);
 
-    let health = warp::path("health")
-        .and(warp::get())
-        .map(|| warp::reply::json(&serde_json::json!({
-            "status": "running",
-            "service": "file-cleanup-handler"
-        })));
+    let health = warp::path("health").and(warp::get()).map(|| {
+        warp::reply::json(&serde_json::json!({
+            "status": "ok",
+            "service": "file-cleanup-server"
+        }))
+    });
 
     let routes = cleanup.or(health);
 
     info!("🧹 Starting file cleanup server on port {}", port);
-    warp::serve(routes)
-        .run(([127, 0, 0, 1], port))
-        .await;
+
+    warp::serve(routes).run(([127, 0, 0, 1], port)).await;
 
     Ok(())
 }
@@ -327,79 +397,129 @@ async fn handle_cleanup_request(
     request: serde_json::Value,
     cost_tracker: Arc<StorageCostTracker>,
     base_dir: Arc<PathBuf>,
-) -> Result<impl warp::Reply, warp::Rejection> {
-    info!("🧹 Received cleanup request: {}", request);
-    
-    // FIXED: Extract file path from the request payload
-    let file_path_str = if let Some(file_path) = request.get("file_path").and_then(|v| v.as_str()) {
-        file_path.to_string()
+) -> std::result::Result<impl warp::Reply, warp::Rejection> {
+    use std::fs;
+
+    debug!("🧹 Cleanup request: {}", request);
+
+    // FIXED: Extract file path from multiple possible sources with proper lifetime handling
+    let file_path_str = if let Some(path) = request.get("file_path").and_then(|v| v.as_str()) {
+        path.to_string()
+    } else if let Some(path) = request.get("object_id").and_then(|v| v.as_str()) {
+        // GarbageTruck sends the file path as object_id
+        path.to_string()
     } else if let Some(payload) = request.get("payload").and_then(|v| v.as_str()) {
-        // Try to parse the payload JSON for file_path
+        // Check if file_path is in the payload JSON
         if let Ok(payload_json) = serde_json::from_str::<serde_json::Value>(payload) {
-            if let Some(file_path) = payload_json.get("file_path").and_then(|v| v.as_str()) {
-                file_path.to_string()
-            } else {
-                // Fall back to object_id if no file_path
-                request.get("object_id").and_then(|v| v.as_str()).unwrap_or("").to_string()
-            }
+            payload_json
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
         } else {
-            request.get("object_id").and_then(|v| v.as_str()).unwrap_or("").to_string()
+            String::new()
         }
     } else {
-        // Use object_id as file path
-        request.get("object_id").and_then(|v| v.as_str()).unwrap_or("").to_string()
+        String::new()
     };
 
     if file_path_str.is_empty() {
-        warn!("🚫 No file path provided in cleanup request");
         return Ok(warp::reply::json(&serde_json::json!({
             "success": false,
-            "error": "No file_path or object_id provided"
+            "error": "No file_path provided"
         })));
     }
 
     let file_path = Path::new(&file_path_str);
-    
-    // Security check - ensure file is within our base directory OR use the filename from object_id
-    let target_file = if file_path.starts_with(&**base_dir) {
-        file_path.to_path_buf()
+
+    // FIXED: Security check that works with relative paths like "./temp_experiment/with_gc/job_1.dat"
+    let is_safe = if file_path.is_absolute() {
+        file_path.starts_with(base_dir.as_ref())
     } else {
-        // If object_id doesn't start with base_dir, treat it as a filename within base_dir
-        let filename = file_path.file_name().unwrap_or_else(|| {
-            std::ffi::OsStr::new(&file_path_str)
-        });
-        base_dir.join(filename)
+        // For relative paths, check if they don't escape and if they exist
+        if file_path_str.contains("..") {
+            false
+        } else {
+            // Handle paths that start with "./"
+            let clean_path = if file_path_str.starts_with("./") {
+                Path::new(&file_path_str[2..])
+            } else {
+                file_path
+            };
+
+            // Check if file exists (either directly or relative to current dir)
+            file_path.exists() || {
+                let current_dir_path = std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(clean_path);
+                current_dir_path.exists()
+            }
+        }
     };
 
-    if target_file.exists() {
-        match fs::remove_file(&target_file) {
-            Ok(_) => {
-                // FIXED: Get actual file size before deletion, or use estimated size
-                let file_size = 100 * 1024 * 1024; // 100MB estimated
-                cost_tracker.file_cleaned(file_size);
-                info!("✅ Successfully cleaned up file: {:?}", target_file);
-                
-                Ok(warp::reply::json(&serde_json::json!({
-                    "success": true,
-                    "message": "File cleaned up successfully",
-                    "file_path": target_file.to_string_lossy()
-                })))
+    if is_safe
+        && (file_path.exists() || {
+            // Also try the path relative to current directory for "./..." paths
+            let current_dir_path = std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(file_path);
+            current_dir_path.exists()
+        })
+    {
+        // Determine the actual file path to use for deletion
+        let actual_file_path = if file_path.exists() {
+            file_path.to_path_buf()
+        } else {
+            // Try relative to current directory
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(file_path)
+        };
+
+        match fs::metadata(&actual_file_path) {
+            Ok(metadata) => {
+                let file_size = metadata.len();
+                match fs::remove_file(&actual_file_path) {
+                    Ok(_) => {
+                        cost_tracker.file_cleaned(file_size);
+                        info!(
+                            "✅ Cleaned up file: {:?} ({} bytes)",
+                            actual_file_path, file_size
+                        );
+
+                        Ok(warp::reply::json(&serde_json::json!({
+                            "success": true,
+                            "message": "File cleaned up successfully",
+                            "file_path": file_path_str,
+                            "actual_path": format!("{:?}", actual_file_path),
+                            "file_size_bytes": file_size
+                        })))
+                    }
+                    Err(e) => {
+                        error!("Failed to delete file {:?}: {}", actual_file_path, e);
+                        Ok(warp::reply::json(&serde_json::json!({
+                            "success": false,
+                            "error": format!("Failed to delete file: {}", e)
+                        })))
+                    }
+                }
             }
             Err(e) => {
-                error!("❌ Failed to clean up file {:?}: {}", target_file, e);
+                warn!("Could not get file metadata {:?}: {}", actual_file_path, e);
                 Ok(warp::reply::json(&serde_json::json!({
-                    "success": false,
-                    "error": format!("Failed to delete file: {}", e)
+                    "success": true,
+                    "message": "File already cleaned up or not found"
                 })))
             }
         }
     } else {
-        info!("ℹ️  File not found (already deleted?): {:?}", target_file);
-        // Don't treat this as an error - file might already be cleaned up
+        warn!(
+            "🚫 Invalid file path or security check failed: {:?}",
+            file_path
+        );
         Ok(warp::reply::json(&serde_json::json!({
-            "success": true,
-            "message": "File not found (already cleaned up)",
-            "file_path": target_file.to_string_lossy()
+            "success": false,
+            "error": "Invalid file path or security check failed"
         })))
     }
 }

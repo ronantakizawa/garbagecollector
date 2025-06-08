@@ -270,14 +270,25 @@ impl Metrics {
         self.storage_operations_total
             .with_label_values(&[operation, backend])
             .inc();
-        debug!("📊 Incremented storage operation: {} on {}", operation, backend);
+        debug!(
+            "📊 Incremented storage operation: {} on {}",
+            operation, backend
+        );
     }
 
-    pub fn record_storage_operation_duration(&self, operation: &str, backend: &str, duration: std::time::Duration) {
+    pub fn record_storage_operation_duration(
+        &self,
+        operation: &str,
+        backend: &str,
+        duration: std::time::Duration,
+    ) {
         self.storage_operation_duration
             .with_label_values(&[operation, backend])
             .observe(duration.as_secs_f64());
-        debug!("📊 Recorded storage operation duration: {} on {} took {:?}", operation, backend, duration);
+        debug!(
+            "📊 Recorded storage operation duration: {} on {} took {:?}",
+            operation, backend, duration
+        );
     }
 
     // gRPC metrics
@@ -285,21 +296,27 @@ impl Metrics {
         self.grpc_requests_total
             .with_label_values(&[method, status])
             .inc();
-        debug!("📊 Incremented gRPC request: {} with status {}", method, status);
+        debug!(
+            "📊 Incremented gRPC request: {} with status {}",
+            method, status
+        );
     }
 
     pub fn record_grpc_request_duration(&self, method: &str, duration: std::time::Duration) {
         self.grpc_request_duration
             .with_label_values(&[method])
             .observe(duration.as_secs_f64());
-        debug!("📊 Recorded gRPC request duration: {} took {:?}", method, duration);
+        debug!(
+            "📊 Recorded gRPC request duration: {} took {:?}",
+            method, duration
+        );
     }
 
     // Service and type tracking
     pub fn update_leases_by_service(&self, stats: &HashMap<String, usize>) {
         // Clear existing values
         self.leases_by_service.reset();
-        
+
         // Set new values
         for (service_id, count) in stats {
             self.leases_by_service
@@ -312,7 +329,7 @@ impl Metrics {
     pub fn update_leases_by_type(&self, stats: &HashMap<String, usize>) {
         // Clear existing values
         self.leases_by_type.reset();
-        
+
         // Set new values
         for (object_type, count) in stats {
             self.leases_by_type
@@ -373,57 +390,77 @@ impl Default for Metrics {
         let leases_created_total = IntCounter::with_opts(Opts::new(
             "garbagetruck_leases_created_total",
             "Total number of leases created",
-        )).expect("Failed to create leases_created_total metric");
+        ))
+        .expect("Failed to create leases_created_total metric");
 
         let leases_renewed_total = IntCounter::with_opts(Opts::new(
-            "garbagetruck_leases_renewed_total", 
+            "garbagetruck_leases_renewed_total",
             "Total number of lease renewals",
-        )).expect("Failed to create leases_renewed_total metric");
+        ))
+        .expect("Failed to create leases_renewed_total metric");
 
         let leases_expired_total = IntCounter::with_opts(Opts::new(
             "garbagetruck_leases_expired_total",
             "Total number of leases that expired",
-        )).expect("Failed to create leases_expired_total metric");
+        ))
+        .expect("Failed to create leases_expired_total metric");
 
         let leases_released_total = IntCounter::with_opts(Opts::new(
             "garbagetruck_leases_released_total",
             "Total number of leases explicitly released",
-        )).expect("Failed to create leases_released_total metric");
+        ))
+        .expect("Failed to create leases_released_total metric");
 
         let active_leases = IntGauge::with_opts(Opts::new(
             "garbagetruck_active_leases",
             "Current number of active leases",
-        )).expect("Failed to create active_leases metric");
+        ))
+        .expect("Failed to create active_leases metric");
 
         let leases_by_service = IntGaugeVec::new(
-            Opts::new("garbagetruck_leases_by_service", "Number of leases grouped by service"),
+            Opts::new(
+                "garbagetruck_leases_by_service",
+                "Number of leases grouped by service",
+            ),
             &["service_id"],
-        ).expect("Failed to create leases_by_service metric");
+        )
+        .expect("Failed to create leases_by_service metric");
 
         let leases_by_type = IntGaugeVec::new(
-            Opts::new("garbagetruck_leases_by_type", "Number of leases grouped by object type"),
+            Opts::new(
+                "garbagetruck_leases_by_type",
+                "Number of leases grouped by object type",
+            ),
             &["object_type"],
-        ).expect("Failed to create leases_by_type metric");
+        )
+        .expect("Failed to create leases_by_type metric");
 
         let cleanup_operations_total = IntCounter::with_opts(Opts::new(
             "garbagetruck_cleanup_operations_total",
             "Total number of cleanup operations performed",
-        )).expect("Failed to create cleanup_operations_total metric");
+        ))
+        .expect("Failed to create cleanup_operations_total metric");
 
         let cleanup_failures_total = IntCounter::with_opts(Opts::new(
             "garbagetruck_cleanup_failures_total",
             "Total number of failed cleanup operations",
-        )).expect("Failed to create cleanup_failures_total metric");
+        ))
+        .expect("Failed to create cleanup_failures_total metric");
 
         let cleanup_duration_histogram = Histogram::with_opts(HistogramOpts::new(
             "garbagetruck_cleanup_duration_seconds",
             "Duration of cleanup operations in seconds",
-        )).expect("Failed to create cleanup_duration_histogram metric");
+        ))
+        .expect("Failed to create cleanup_duration_histogram metric");
 
         let storage_operations_total = IntCounterVec::new(
-            Opts::new("garbagetruck_storage_operations_total", "Total number of storage operations"),
+            Opts::new(
+                "garbagetruck_storage_operations_total",
+                "Total number of storage operations",
+            ),
             &["operation", "backend"],
-        ).expect("Failed to create storage_operations_total metric");
+        )
+        .expect("Failed to create storage_operations_total metric");
 
         let storage_operation_duration = HistogramVec::new(
             HistogramOpts::new(
@@ -431,12 +468,17 @@ impl Default for Metrics {
                 "Duration of storage operations in seconds",
             ),
             &["operation", "backend"],
-        ).expect("Failed to create storage_operation_duration metric");
+        )
+        .expect("Failed to create storage_operation_duration metric");
 
         let grpc_requests_total = IntCounterVec::new(
-            Opts::new("garbagetruck_grpc_requests_total", "Total number of gRPC requests"),
+            Opts::new(
+                "garbagetruck_grpc_requests_total",
+                "Total number of gRPC requests",
+            ),
             &["method", "status"],
-        ).expect("Failed to create grpc_requests_total metric");
+        )
+        .expect("Failed to create grpc_requests_total metric");
 
         let grpc_request_duration = HistogramVec::new(
             HistogramOpts::new(
@@ -444,7 +486,8 @@ impl Default for Metrics {
                 "Duration of gRPC requests in seconds",
             ),
             &["method"],
-        ).expect("Failed to create grpc_request_duration metric");
+        )
+        .expect("Failed to create grpc_request_duration metric");
 
         Self {
             leases_created_total,
@@ -480,13 +523,13 @@ mod tests {
     #[test]
     fn test_lease_metrics() {
         let metrics = Metrics::new();
-        
+
         metrics.increment_leases_created();
         assert_eq!(metrics.leases_created_total.get(), 1);
-        
+
         metrics.increment_active_leases();
         assert_eq!(metrics.active_leases.get(), 1);
-        
+
         metrics.decrement_active_leases();
         assert_eq!(metrics.active_leases.get(), 0);
     }
@@ -494,13 +537,13 @@ mod tests {
     #[test]
     fn test_cleanup_metrics() {
         let metrics = Metrics::new();
-        
+
         metrics.increment_cleanup_operations();
         assert_eq!(metrics.cleanup_operations_total.get(), 1);
-        
+
         metrics.increment_cleanup_failures();
         assert_eq!(metrics.cleanup_failures_total.get(), 1);
-        
+
         let duration = std::time::Duration::from_millis(100);
         metrics.record_cleanup_duration(duration);
         // Can't easily test histogram values, but ensure no panic
@@ -509,18 +552,18 @@ mod tests {
     #[test]
     fn test_service_type_metrics() {
         let metrics = Metrics::new();
-        
+
         let mut service_stats = HashMap::new();
         service_stats.insert("service1".to_string(), 5);
         service_stats.insert("service2".to_string(), 3);
-        
+
         let mut type_stats = HashMap::new();
         type_stats.insert("TemporaryFile".to_string(), 4);
         type_stats.insert("DatabaseRow".to_string(), 4);
-        
+
         metrics.update_leases_by_service(&service_stats);
         metrics.update_leases_by_type(&type_stats);
-        
+
         // Test passes if no panics occur
     }
 }

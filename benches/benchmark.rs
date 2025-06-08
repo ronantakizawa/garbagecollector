@@ -128,7 +128,9 @@ fn bench_lease_operations(c: &mut Criterion) {
 
         if let Ok(mut client) = setup_client().await {
             for i in 0..10 {
-                if let Ok(lease_id) = create_lease_benchmark(&mut client, &format!("setup-{}", i)).await {
+                if let Ok(lease_id) =
+                    create_lease_benchmark(&mut client, &format!("setup-{}", i)).await
+                {
                     ids.push(lease_id);
                 }
             }
@@ -209,7 +211,7 @@ fn bench_concurrent_operations(c: &mut Criterion) {
 
     for concurrency in [1, 5, 10, 25, 50].iter() {
         group.throughput(Throughput::Elements(*concurrency as u64));
-        
+
         group.bench_with_input(
             BenchmarkId::new("concurrent_create", concurrency),
             concurrency,
@@ -224,8 +226,10 @@ fn bench_concurrent_operations(c: &mut Criterion) {
                             let handle = tokio::spawn(async move {
                                 let _permit = permit;
                                 if let Ok(mut client) = setup_client().await {
-                                    let service_suffix = format!("concurrent-{}-{}", concurrency, i);
-                                    let _ = create_lease_benchmark(&mut client, &service_suffix).await;
+                                    let service_suffix =
+                                        format!("concurrent-{}-{}", concurrency, i);
+                                    let _ =
+                                        create_lease_benchmark(&mut client, &service_suffix).await;
                                 }
                             });
                             handles.push(handle);
@@ -240,7 +244,8 @@ fn bench_concurrent_operations(c: &mut Criterion) {
         );
 
         // Test concurrent renewals (simplified to avoid setup issues)
-        if *concurrency <= 10 {  // Only test smaller concurrency levels for renewals
+        if *concurrency <= 10 {
+            // Only test smaller concurrency levels for renewals
             group.bench_with_input(
                 BenchmarkId::new("concurrent_renew", concurrency),
                 concurrency,
@@ -249,17 +254,19 @@ fn bench_concurrent_operations(c: &mut Criterion) {
                         rt.block_on(async move {
                             // Create leases on-demand for renewal test
                             let mut lease_data = Vec::new();
-                            
+
                             // First create the leases we'll renew
                             if let Ok(mut client) = setup_client().await {
                                 for i in 0..concurrency {
                                     let service_suffix = format!("renew-{}-{}", concurrency, i);
-                                    if let Ok(lease_id) = create_lease_benchmark(&mut client, &service_suffix).await {
+                                    if let Ok(lease_id) =
+                                        create_lease_benchmark(&mut client, &service_suffix).await
+                                    {
                                         lease_data.push((lease_id, service_suffix));
                                     }
                                 }
                             }
-                            
+
                             // Now renew them concurrently
                             if lease_data.len() == concurrency {
                                 let semaphore = Arc::new(Semaphore::new(concurrency));
@@ -270,7 +277,12 @@ fn bench_concurrent_operations(c: &mut Criterion) {
                                     let handle = tokio::spawn(async move {
                                         let _permit = permit;
                                         if let Ok(mut client) = setup_client().await {
-                                            let _ = renew_lease_benchmark(&mut client, &lease_id, &service_suffix).await;
+                                            let _ = renew_lease_benchmark(
+                                                &mut client,
+                                                &lease_id,
+                                                &service_suffix,
+                                            )
+                                            .await;
                                         }
                                     });
                                     handles.push(handle);
@@ -321,17 +333,21 @@ fn bench_cleanup_operations(c: &mut Criterion) {
             rt.block_on(async {
                 if let Ok(mut client) = setup_client().await {
                     let service_suffix = Uuid::new_v4().to_string();
-                    
+
                     // Create lease with cleanup
-                    if let Ok(lease_id) = create_lease_with_cleanup_benchmark(&mut client, &service_suffix).await {
+                    if let Ok(lease_id) =
+                        create_lease_with_cleanup_benchmark(&mut client, &service_suffix).await
+                    {
                         // Renew it once
-                        let _ = renew_lease_benchmark(&mut client, &lease_id, &service_suffix).await;
-                        
+                        let _ =
+                            renew_lease_benchmark(&mut client, &lease_id, &service_suffix).await;
+
                         // Get lease info
                         let _ = get_lease_benchmark(&mut client, &lease_id).await;
-                        
+
                         // Release it
-                        let _ = release_lease_benchmark(&mut client, &lease_id, &service_suffix).await;
+                        let _ =
+                            release_lease_benchmark(&mut client, &lease_id, &service_suffix).await;
                     }
                 }
             })
@@ -357,7 +373,7 @@ fn bench_memory_usage(c: &mut Criterion) {
 
     for lease_count in [100, 500, 1000, 2500].iter() {
         group.throughput(Throughput::Elements(*lease_count as u64));
-        
+
         group.bench_with_input(
             BenchmarkId::new("create_many_leases", lease_count),
             lease_count,
@@ -366,7 +382,7 @@ fn bench_memory_usage(c: &mut Criterion) {
                     rt.block_on(async move {
                         if let Ok(mut client) = setup_client().await {
                             let service_suffix = Uuid::new_v4().to_string();
-                            
+
                             for i in 0..lease_count {
                                 let request = CreateLeaseRequest {
                                     object_id: format!("memory-test-{}-{}", service_suffix, i),
@@ -377,7 +393,8 @@ fn bench_memory_usage(c: &mut Criterion) {
                                         ("iteration".to_string(), i.to_string()),
                                         ("batch".to_string(), "memory_test".to_string()),
                                         ("service".to_string(), service_suffix.clone()),
-                                    ].into(),
+                                    ]
+                                    .into(),
                                     cleanup_config: None,
                                 };
 
@@ -402,7 +419,7 @@ fn bench_memory_usage(c: &mut Criterion) {
                 if let Ok(mut client) = setup_client().await {
                     let service_suffix = Uuid::new_v4().to_string();
                     let mut lease_ids = Vec::new();
-                    
+
                     // Create 50 leases
                     for i in 0..50 {
                         let request = CreateLeaseRequest {
@@ -418,10 +435,11 @@ fn bench_memory_usage(c: &mut Criterion) {
                             lease_ids.push(response.into_inner().lease_id);
                         }
                     }
-                    
+
                     // Release all leases
                     for lease_id in lease_ids {
-                        let _ = release_lease_benchmark(&mut client, &lease_id, &service_suffix).await;
+                        let _ =
+                            release_lease_benchmark(&mut client, &lease_id, &service_suffix).await;
                     }
                 }
             })
@@ -454,7 +472,7 @@ fn bench_network_latency(c: &mut Criterion) {
                     rt.block_on(async {
                         if let Ok(mut client) = setup_client().await {
                             let service_suffix = Uuid::new_v4().to_string();
-                            
+
                             // Create metadata of specified size
                             let mut metadata = HashMap::new();
                             for i in 0..metadata_size {
@@ -463,7 +481,7 @@ fn bench_network_latency(c: &mut Criterion) {
                                     format!("value_with_some_data_{}", i),
                                 );
                             }
-                            
+
                             let request = CreateLeaseRequest {
                                 object_id: format!("latency-test-{}", service_suffix),
                                 object_type: ObjectType::CacheEntry as i32,
@@ -484,7 +502,7 @@ fn bench_network_latency(c: &mut Criterion) {
     // Test connection reuse vs new connections
     group.bench_function("reused_connection", |b| {
         let client = rt.block_on(async { setup_client().await.ok() });
-        
+
         if let Some(mut client) = client {
             b.iter(|| {
                 rt.block_on(async {
@@ -512,7 +530,7 @@ fn bench_network_latency(c: &mut Criterion) {
             rt.block_on(async {
                 if let Ok(mut client) = setup_client().await {
                     let service_suffix = Uuid::new_v4().to_string();
-                    
+
                     // Rapid-fire 10 operations
                     for i in 0..10 {
                         let request = CreateLeaseRequest {
@@ -523,7 +541,7 @@ fn bench_network_latency(c: &mut Criterion) {
                             metadata: HashMap::new(),
                             cleanup_config: None,
                         };
-                        
+
                         let _ = client.create_lease(request).await;
                     }
                 }
@@ -573,7 +591,10 @@ mod benchmark_tests {
                 // Create 10 leases and measure time
                 for i in 0..10 {
                     let service_suffix = format!("baseline-{}", i);
-                    if create_lease_benchmark(&mut client, &service_suffix).await.is_err() {
+                    if create_lease_benchmark(&mut client, &service_suffix)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -608,13 +629,15 @@ mod benchmark_tests {
             if let Ok(_client) = setup_client().await {
                 let start = Instant::now();
                 let concurrency = 5;
-                
+
                 let mut handles = Vec::new();
                 for i in 0..concurrency {
                     let handle = tokio::spawn(async move {
                         if let Ok(mut client) = setup_client().await {
                             let service_suffix = format!("concurrent-test-{}", i);
-                            create_lease_benchmark(&mut client, &service_suffix).await.ok()
+                            create_lease_benchmark(&mut client, &service_suffix)
+                                .await
+                                .ok()
                         } else {
                             None
                         }
@@ -624,12 +647,15 @@ mod benchmark_tests {
 
                 let results: Vec<_> = futures::future::join_all(handles).await;
                 let successful = results.into_iter().filter_map(|r| r.ok()).count();
-                
+
                 let duration = start.elapsed();
                 let ops_per_sec = successful as f64 / duration.as_secs_f64();
 
-                println!("Concurrent performance ({} threads): {:.2} ops/sec", concurrency, ops_per_sec);
-                
+                println!(
+                    "Concurrent performance ({} threads): {:.2} ops/sec",
+                    concurrency, ops_per_sec
+                );
+
                 // Should handle at least 5 ops/sec with concurrency
                 assert!(
                     ops_per_sec > 5.0,

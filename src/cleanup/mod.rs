@@ -1,4 +1,4 @@
-// src/cleanup/mod.rs - Fixed module structure
+// src/cleanup/mod.rs - Fixed to actually send HTTP cleanup requests
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -38,6 +38,10 @@ impl CleanupExecutor {
 
     pub async fn cleanup_lease(&self, lease: &Lease) -> Result<()> {
         if let Some(ref cleanup_config) = lease.cleanup_config {
+            info!(
+                "🧹 Starting cleanup for lease {} (object: {})",
+                lease.lease_id, lease.object_id
+            );
             self.execute_cleanup(lease, cleanup_config).await
         } else {
             debug!(
@@ -69,7 +73,7 @@ impl CleanupExecutor {
                         lease_id = %lease.lease_id,
                         object_id = %lease.object_id,
                         attempt = attempt,
-                        "Successfully cleaned up lease"
+                        "✅ Successfully cleaned up lease"
                     );
                     return Ok(());
                 }
@@ -80,10 +84,11 @@ impl CleanupExecutor {
                         attempt = attempt,
                         max_retries = max_retries,
                         error = %e,
-                        "Cleanup attempt failed"
+                        "❌ Cleanup attempt failed"
                     );
 
                     if attempt < max_retries {
+                        debug!("⏳ Waiting {}s before retry...", retry_delay.as_secs());
                         tokio::time::sleep(retry_delay).await;
                     } else {
                         return Err(GCError::Cleanup(format!(
@@ -99,21 +104,29 @@ impl CleanupExecutor {
     }
 
     async fn try_cleanup(&self, lease: &Lease, config: &CleanupConfig) -> Result<()> {
-        // Try HTTP cleanup if endpoint is provided
+        // FIXED: Prioritize HTTP cleanup endpoint
         if !config.cleanup_http_endpoint.is_empty() {
+            debug!(
+                "🌐 Using HTTP cleanup endpoint: {}",
+                config.cleanup_http_endpoint
+            );
             return self.cleanup_via_http(lease, config).await;
         }
 
-        // Try gRPC cleanup if endpoint is provided
+        // Fallback to gRPC cleanup if endpoint is provided
         if !config.cleanup_endpoint.is_empty() {
+            debug!(
+                "📡 Using gRPC cleanup endpoint: {}",
+                config.cleanup_endpoint
+            );
             return self.cleanup_via_grpc(lease, config).await;
         }
 
         // If no cleanup endpoints are provided, just log and return success
-        debug!(
+        warn!(
             lease_id = %lease.lease_id,
             object_id = %lease.object_id,
-            "No cleanup endpoints configured, marking cleanup as successful"
+            "⚠️ No cleanup endpoints configured, marking cleanup as successful"
         );
         Ok(())
     }
@@ -128,6 +141,16 @@ impl CleanupExecutor {
             payload: config.cleanup_payload.clone(),
         };
 
+        info!(
+            "📤 Sending HTTP cleanup request to {} for lease {} (object: {})",
+            config.cleanup_http_endpoint, lease.lease_id, lease.object_id
+        );
+
+        debug!(
+            "📝 Cleanup request payload: {}",
+            serde_json::to_string(&cleanup_request).unwrap_or_default()
+        );
+
         let response = timeout(
             self.default_timeout,
             self.http_client
@@ -136,28 +159,40 @@ impl CleanupExecutor {
                 .send(),
         )
         .await
-        .map_err(|_| GCError::Timeout {
-            timeout_seconds: self.default_timeout.as_secs(),
+        .map_err(|_| {
+            error!(
+                "⏰ HTTP cleanup request timed out after {}s",
+                self.default_timeout.as_secs()
+            );
+            GCError::Timeout {
+                timeout_seconds: self.default_timeout.as_secs(),
+            }
         })?
-        .map_err(|e| GCError::Network(e.to_string()))?;
+        .map_err(|e| {
+            error!("🌐 HTTP cleanup request failed: {}", e);
+            GCError::Network(e.to_string())
+        })?;
 
-        if response.status().is_success() {
-            debug!(
-                lease_id = %lease.lease_id,
-                endpoint = %config.cleanup_http_endpoint,
-                "HTTP cleanup successful"
+        let status = response.status();
+        let response_text = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Failed to read response body".to_string());
+
+        if status.is_success() {
+            info!(
+                "✅ HTTP cleanup successful for lease {} (status: {}, response: {})",
+                lease.lease_id, status, response_text
             );
             Ok(())
         } else {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read response body".to_string());
-
+            error!(
+                "❌ HTTP cleanup failed for lease {} with status {}: {}",
+                lease.lease_id, status, response_text
+            );
             Err(GCError::Cleanup(format!(
                 "HTTP cleanup failed with status {}: {}",
-                status, body
+                status, response_text
             )))
         }
     }
@@ -174,6 +209,11 @@ impl CleanupExecutor {
             payload: config.cleanup_payload.clone(),
         };
 
+        info!(
+            "📡 Sending gRPC cleanup request to {} for lease {}",
+            config.cleanup_endpoint, lease.lease_id
+        );
+
         let response = timeout(
             self.default_timeout,
             self.http_client
@@ -188,11 +228,7 @@ impl CleanupExecutor {
         .map_err(|e| GCError::Network(e.to_string()))?;
 
         if response.status().is_success() {
-            debug!(
-                lease_id = %lease.lease_id,
-                endpoint = %config.cleanup_endpoint,
-                "gRPC cleanup successful"
-            );
+            info!("✅ gRPC cleanup successful for lease {}", lease.lease_id);
             Ok(())
         } else {
             let status = response.status();
@@ -201,6 +237,10 @@ impl CleanupExecutor {
                 .await
                 .unwrap_or_else(|_| "Failed to read response body".to_string());
 
+            error!(
+                "❌ gRPC cleanup failed for lease {} with status {}: {}",
+                lease.lease_id, status, body
+            );
             Err(GCError::Cleanup(format!(
                 "gRPC cleanup failed with status {}: {}",
                 status, body
@@ -211,6 +251,8 @@ impl CleanupExecutor {
     pub async fn cleanup_batch(&self, leases: Vec<Lease>) -> Vec<CleanupResult> {
         let mut results = Vec::new();
         let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(10)); // Max 10 concurrent cleanups
+
+        info!("🧹 Starting batch cleanup of {} leases", leases.len());
 
         let mut handles = Vec::new();
         for lease in leases {
@@ -236,7 +278,17 @@ impl CleanupExecutor {
 
         for handle in handles {
             match handle.await {
-                Ok(result) => results.push(result),
+                Ok(result) => {
+                    if result.success {
+                        info!("✅ Batch cleanup success: {}", result.object_id);
+                    } else {
+                        warn!(
+                            "❌ Batch cleanup failed: {} - {:?}",
+                            result.object_id, result.error
+                        );
+                    }
+                    results.push(result);
+                }
                 Err(e) => {
                     error!("Cleanup task panicked: {}", e);
                     results.push(CleanupResult {
@@ -248,6 +300,14 @@ impl CleanupExecutor {
                 }
             }
         }
+
+        let successful = results.iter().filter(|r| r.success).count();
+        let failed = results.len() - successful;
+
+        info!(
+            "📊 Batch cleanup completed: {} successful, {} failed",
+            successful, failed
+        );
 
         results
     }

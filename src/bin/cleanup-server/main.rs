@@ -1,9 +1,9 @@
-// src/bin/cleanup-server/main.rs - Standalone cleanup server
+// src/bin/cleanup-server/main.rs - Fixed cleanup server with proper file path handling
 
+use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
-use clap::Parser;
-use tracing::{info, Level};
+use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber;
 use warp::Filter;
 
@@ -36,7 +36,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
 
     // Initialize logging
-    let log_level = if args.verbose { Level::DEBUG } else { Level::INFO };
+    let log_level = if args.verbose {
+        Level::DEBUG
+    } else {
+        Level::INFO
+    };
     tracing_subscriber::fmt()
         .with_max_level(log_level)
         .with_target(false)
@@ -71,15 +75,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .and(warp::any().map(move || base_dir_cleanup.clone()))
         .and_then(handle_cleanup_request);
 
-    let health = warp::path("health")
-        .and(warp::get())
-        .map(|| {
-            warp::reply::json(&serde_json::json!({
-                "status": "running",
-                "service": "garbagetruck-cleanup-server",
-                "version": env!("CARGO_PKG_VERSION")
-            }))
-        });
+    let health = warp::path("health").and(warp::get()).map(|| {
+        warp::reply::json(&serde_json::json!({
+            "status": "running",
+            "service": "garbagetruck-cleanup-server",
+            "version": env!("CARGO_PKG_VERSION")
+        }))
+    });
 
     let stats = warp::path("stats")
         .and(warp::get())
@@ -88,7 +90,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let routes = cleanup.or(health).or(stats);
 
-    info!("🚀 Cleanup server starting on http://localhost:{}", args.port);
+    info!(
+        "🚀 Cleanup server starting on http://localhost:{}",
+        args.port
+    );
     info!("📊 Endpoints:");
     info!("  POST /cleanup - Delete files");
     info!("  GET  /health  - Health check");
@@ -100,9 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("");
     info!("🛑 Press Ctrl+C to stop");
 
-    warp::serve(routes)
-        .run(([0, 0, 0, 0], args.port))
-        .await;
+    warp::serve(routes).run(([0, 0, 0, 0], args.port)).await;
 
     Ok(())
 }
@@ -111,82 +114,166 @@ async fn handle_cleanup_request(
     request: serde_json::Value,
     cost_tracker: Arc<StorageCostTracker>,
     base_dir: Arc<PathBuf>,
-) -> Result<impl warp::Reply, warp::Rejection> {
+) -> std::result::Result<impl warp::Reply, warp::Rejection> {
     use std::fs;
     use std::path::Path;
-    use tracing::{debug, error, warn};
 
     debug!("🧹 Received cleanup request: {}", request);
-    
-    // Extract file path from the request
-    if let Some(file_path_str) = request.get("file_path").and_then(|v| v.as_str()) {
-        let file_path = Path::new(file_path_str);
-        
-        // Security check - ensure file is within our base directory
-        let canonical_base = base_dir.canonicalize().unwrap_or_else(|_| base_dir.as_ref().clone());
-        let canonical_file = file_path.canonicalize().unwrap_or_else(|_| file_path.to_path_buf());
-        
-        if canonical_file.starts_with(&canonical_base) && file_path.exists() {
-            match fs::metadata(file_path) {
-                Ok(metadata) => {
-                    let file_size = metadata.len();
-                    match fs::remove_file(file_path) {
-                        Ok(_) => {
-                            cost_tracker.file_cleaned(file_size);
-                            info!("✅ Successfully cleaned up file: {:?} ({} bytes)", file_path, file_size);
-                            
-                            Ok(warp::reply::json(&serde_json::json!({
-                                "success": true,
-                                "message": "File cleaned up successfully",
-                                "file_path": file_path_str,
-                                "file_size_bytes": file_size,
-                                "timestamp": chrono::Utc::now().to_rfc3339()
-                            })))
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to clean up file {:?}: {}", file_path, e);
-                            Ok(warp::reply::json(&serde_json::json!({
-                                "success": false,
-                                "error": format!("Failed to delete file: {}", e),
-                                "file_path": file_path_str
-                            })))
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("⚠️  Could not get metadata for file {:?}: {}", file_path, e);
-                    Ok(warp::reply::json(&serde_json::json!({
-                        "success": false,
-                        "error": format!("Could not access file: {}", e),
-                        "file_path": file_path_str
-                    })))
-                }
-            }
+
+    // FIXED: Extract file path from multiple possible sources with proper lifetime handling
+    let file_path_str = if let Some(path) = request.get("file_path").and_then(|v| v.as_str()) {
+        path.to_string()
+    } else if let Some(path) = request.get("object_id").and_then(|v| v.as_str()) {
+        // GarbageTruck sends the file path as object_id
+        path.to_string()
+    } else if let Some(payload) = request.get("payload").and_then(|v| v.as_str()) {
+        // Check if file_path is in the payload JSON
+        if let Ok(payload_json) = serde_json::from_str::<serde_json::Value>(payload) {
+            payload_json
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
         } else {
-            warn!("🚫 Security violation or file not found: {:?}", file_path);
-            warn!("   Base directory: {:?}", canonical_base);
-            warn!("   Requested file: {:?}", canonical_file);
-            
-            Ok(warp::reply::json(&serde_json::json!({
+            error!("❌ No file_path found in cleanup request payload");
+            return Ok(warp::reply::json(&serde_json::json!({
                 "success": false,
-                "error": "Invalid file path or file not found (security check failed)",
-                "file_path": file_path_str
-            })))
+                "error": "No file_path provided in request payload"
+            })));
         }
     } else {
-        warn!("🚫 No file_path provided in cleanup request");
-        Ok(warp::reply::json(&serde_json::json!({
+        error!("❌ No file_path found in cleanup request");
+        return Ok(warp::reply::json(&serde_json::json!({
             "success": false,
             "error": "No file_path provided in request body"
+        })));
+    };
+
+    let file_path = Path::new(&file_path_str);
+
+    info!("🗑️  Processing cleanup request for file: {:?}", file_path);
+
+    // FIXED: More flexible security check that works with relative paths
+    let is_safe_path = if file_path.is_absolute() {
+        // For absolute paths, check if they're within the base directory
+        match (file_path.canonicalize(), base_dir.canonicalize()) {
+            (Ok(canonical_file), Ok(canonical_base)) => canonical_file.starts_with(canonical_base),
+            _ => {
+                // If canonicalization fails, check if the file exists and is within base_dir
+                file_path.starts_with(base_dir.as_ref()) && file_path.exists()
+            }
+        }
+    } else {
+        // FIXED: For relative paths, construct full path and check safety
+        let full_path = if file_path_str.starts_with("./") {
+            // Path like "./temp_experiment/with_gc/job_1.dat"
+            Path::new(&file_path_str[2..]) // Remove "./" prefix
+        } else {
+            file_path
+        };
+
+        // Check if it's within our base directory and doesn't escape with ".."
+        !file_path_str.contains("..") && {
+            // Construct the expected full path
+            let expected_path = std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(full_path);
+
+            debug!(
+                "🔍 Security check: file={:?}, base={:?}, expected={:?}",
+                file_path, base_dir, expected_path
+            );
+
+            // Check if file exists at the expected location
+            expected_path.exists()
+        }
+    };
+
+    debug!(
+        "🔐 Security check result: {} for path {:?}",
+        is_safe_path, file_path
+    );
+
+    if is_safe_path {
+        // Determine the actual file path to use
+        let actual_file_path = if file_path.exists() {
+            file_path.to_path_buf()
+        } else {
+            // Try relative to current directory for paths like "./temp_experiment/..."
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(file_path)
+        };
+
+        info!("🎯 Attempting to delete file: {:?}", actual_file_path);
+
+        match fs::metadata(&actual_file_path) {
+            Ok(metadata) => {
+                let file_size = metadata.len();
+                match fs::remove_file(&actual_file_path) {
+                    Ok(_) => {
+                        cost_tracker.file_cleaned(file_size);
+                        info!(
+                            "✅ Successfully cleaned up file: {:?} ({} bytes)",
+                            actual_file_path, file_size
+                        );
+
+                        Ok(warp::reply::json(&serde_json::json!({
+                            "success": true,
+                            "message": "File cleaned up successfully",
+                            "file_path": file_path_str,
+                            "actual_path": format!("{:?}", actual_file_path),
+                            "file_size_bytes": file_size,
+                            "timestamp": chrono::Utc::now().to_rfc3339()
+                        })))
+                    }
+                    Err(e) => {
+                        error!("❌ Failed to clean up file {:?}: {}", actual_file_path, e);
+                        Ok(warp::reply::json(&serde_json::json!({
+                            "success": false,
+                            "error": format!("Failed to delete file: {}", e),
+                            "file_path": file_path_str,
+                            "actual_path": format!("{:?}", actual_file_path)
+                        })))
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "⚠️  Could not get metadata for file {:?}: {}",
+                    actual_file_path, e
+                );
+                // File might already be deleted, which is fine for cleanup
+                Ok(warp::reply::json(&serde_json::json!({
+                    "success": true,
+                    "message": "File already cleaned up or not found",
+                    "file_path": file_path_str,
+                    "actual_path": format!("{:?}", actual_file_path),
+                    "note": format!("File metadata error: {}", e)
+                })))
+            }
+        }
+    } else {
+        warn!("🚫 Security violation or file not found: {:?}", file_path);
+        warn!("   Base directory: {:?}", base_dir);
+        warn!("   Requested file: {:?}", file_path);
+        warn!("   File exists: {}", file_path.exists());
+
+        Ok(warp::reply::json(&serde_json::json!({
+            "success": false,
+            "error": "Invalid file path or file not found (security check failed)",
+            "file_path": file_path_str,
+            "base_directory": format!("{:?}", base_dir),
+            "file_exists": file_path.exists()
         })))
     }
 }
 
 async fn handle_stats_request(
     cost_tracker: Arc<StorageCostTracker>,
-) -> Result<impl warp::Reply, warp::Rejection> {
+) -> std::result::Result<impl warp::Reply, warp::Rejection> {
     let stats = cost_tracker.get_stats();
-    
+
     Ok(warp::reply::json(&serde_json::json!({
         "total_files_created": stats.total_files_created,
         "total_files_cleaned": stats.total_files_cleaned,

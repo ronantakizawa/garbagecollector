@@ -2,8 +2,8 @@
 
 // This is the specific fix for the list_leases method around line 328
 
-use tonic::{Request, Response, Status};
 use std::sync::Arc;
+use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
@@ -22,11 +22,7 @@ pub struct GCServiceHandlers {
 }
 
 impl GCServiceHandlers {
-    pub fn new(
-        storage: Arc<dyn Storage>,
-        config: Arc<Config>,
-        metrics: Arc<Metrics>,
-    ) -> Self {
+    pub fn new(storage: Arc<dyn Storage>, config: Arc<Config>, metrics: Arc<Metrics>) -> Self {
         Self {
             storage,
             config,
@@ -71,7 +67,11 @@ impl DistributedGcService for GCServiceHandlers {
         }
 
         // Check service lease limits
-        match self.storage.count_active_leases_for_service(&req.service_id).await {
+        match self
+            .storage
+            .count_active_leases_for_service(&req.service_id)
+            .await
+        {
             Ok(count) => {
                 if count >= self.config.gc.max_leases_per_service {
                     return Err(Status::resource_exhausted(format!(
@@ -81,7 +81,10 @@ impl DistributedGcService for GCServiceHandlers {
                 }
             }
             Err(e) => {
-                error!("Failed to count leases for service {}: {}", req.service_id, e);
+                error!(
+                    "Failed to count leases for service {}: {}",
+                    req.service_id, e
+                );
                 return Err(Status::internal("Failed to check service lease limits"));
             }
         }
@@ -121,12 +124,17 @@ impl DistributedGcService for GCServiceHandlers {
             Ok(_) => {
                 self.metrics.increment_leases_created();
                 self.metrics.increment_active_leases();
-                
-                let duration = start_time.elapsed();
-                self.metrics.record_grpc_request_duration("create_lease", duration);
-                self.metrics.increment_grpc_request("create_lease", "success");
 
-                info!("✅ Created lease {} for service {}", lease_id, req.service_id);
+                let duration = start_time.elapsed();
+                self.metrics
+                    .record_grpc_request_duration("create_lease", duration);
+                self.metrics
+                    .increment_grpc_request("create_lease", "success");
+
+                info!(
+                    "✅ Created lease {} for service {}",
+                    lease_id, req.service_id
+                );
 
                 Ok(Response::new(CreateLeaseResponse {
                     lease_id,
@@ -159,7 +167,8 @@ impl DistributedGcService for GCServiceHandlers {
         let mut lease = match self.storage.get_lease(&req.lease_id).await {
             Ok(Some(lease)) => lease,
             Ok(None) => {
-                self.metrics.increment_grpc_request("renew_lease", "not_found");
+                self.metrics
+                    .increment_grpc_request("renew_lease", "not_found");
                 return Err(Status::not_found("Lease not found"));
             }
             Err(e) => {
@@ -170,13 +179,15 @@ impl DistributedGcService for GCServiceHandlers {
 
         // Verify service ownership
         if lease.service_id != req.service_id {
-            self.metrics.increment_grpc_request("renew_lease", "unauthorized");
+            self.metrics
+                .increment_grpc_request("renew_lease", "unauthorized");
             return Err(Status::permission_denied("Unauthorized access to lease"));
         }
 
         // Check if lease is still active
         if lease.state != LeaseState::Active {
-            self.metrics.increment_grpc_request("renew_lease", "invalid_state");
+            self.metrics
+                .increment_grpc_request("renew_lease", "invalid_state");
             return Err(Status::failed_precondition("Lease is not active"));
         }
 
@@ -189,12 +200,17 @@ impl DistributedGcService for GCServiceHandlers {
                 match self.storage.update_lease(lease).await {
                     Ok(_) => {
                         self.metrics.increment_leases_renewed();
-                        
-                        let duration = start_time.elapsed();
-                        self.metrics.record_grpc_request_duration("renew_lease", duration);
-                        self.metrics.increment_grpc_request("renew_lease", "success");
 
-                        info!("✅ Renewed lease {} for service {}", req.lease_id, req.service_id);
+                        let duration = start_time.elapsed();
+                        self.metrics
+                            .record_grpc_request_duration("renew_lease", duration);
+                        self.metrics
+                            .increment_grpc_request("renew_lease", "success");
+
+                        info!(
+                            "✅ Renewed lease {} for service {}",
+                            req.lease_id, req.service_id
+                        );
 
                         Ok(Response::new(RenewLeaseResponse {
                             new_expires_at: Some(prost_types::Timestamp {
@@ -233,18 +249,21 @@ impl DistributedGcService for GCServiceHandlers {
         let lease = match self.storage.get_lease(&req.lease_id).await {
             Ok(Some(lease)) => lease,
             Ok(None) => {
-                self.metrics.increment_grpc_request("release_lease", "not_found");
+                self.metrics
+                    .increment_grpc_request("release_lease", "not_found");
                 return Err(Status::not_found("Lease not found"));
             }
             Err(e) => {
-                self.metrics.increment_grpc_request("release_lease", "error");
+                self.metrics
+                    .increment_grpc_request("release_lease", "error");
                 return Err(Status::from(e));
             }
         };
 
         // Verify service ownership
         if lease.service_id != req.service_id {
-            self.metrics.increment_grpc_request("release_lease", "unauthorized");
+            self.metrics
+                .increment_grpc_request("release_lease", "unauthorized");
             return Err(Status::permission_denied("Unauthorized access to lease"));
         }
 
@@ -253,12 +272,17 @@ impl DistributedGcService for GCServiceHandlers {
             Ok(_) => {
                 self.metrics.increment_leases_released();
                 self.metrics.decrement_active_leases();
-                
-                let duration = start_time.elapsed();
-                self.metrics.record_grpc_request_duration("release_lease", duration);
-                self.metrics.increment_grpc_request("release_lease", "success");
 
-                info!("✅ Released lease {} for service {}", req.lease_id, req.service_id);
+                let duration = start_time.elapsed();
+                self.metrics
+                    .record_grpc_request_duration("release_lease", duration);
+                self.metrics
+                    .increment_grpc_request("release_lease", "success");
+
+                info!(
+                    "✅ Released lease {} for service {}",
+                    req.lease_id, req.service_id
+                );
 
                 Ok(Response::new(ReleaseLeaseResponse {
                     success: true,
@@ -266,7 +290,8 @@ impl DistributedGcService for GCServiceHandlers {
                 }))
             }
             Err(e) => {
-                self.metrics.increment_grpc_request("release_lease", "error");
+                self.metrics
+                    .increment_grpc_request("release_lease", "error");
                 error!("Failed to release lease: {}", e);
                 Err(Status::from(e))
             }
@@ -285,7 +310,8 @@ impl DistributedGcService for GCServiceHandlers {
         match self.storage.get_lease(&req.lease_id).await {
             Ok(Some(lease)) => {
                 let duration = start_time.elapsed();
-                self.metrics.record_grpc_request_duration("get_lease", duration);
+                self.metrics
+                    .record_grpc_request_duration("get_lease", duration);
                 self.metrics.increment_grpc_request("get_lease", "success");
 
                 Ok(Response::new(GetLeaseResponse {
@@ -295,8 +321,10 @@ impl DistributedGcService for GCServiceHandlers {
             }
             Ok(None) => {
                 let duration = start_time.elapsed();
-                self.metrics.record_grpc_request_duration("get_lease", duration);
-                self.metrics.increment_grpc_request("get_lease", "not_found");
+                self.metrics
+                    .record_grpc_request_duration("get_lease", duration);
+                self.metrics
+                    .increment_grpc_request("get_lease", "not_found");
 
                 Ok(Response::new(GetLeaseResponse {
                     lease: None,
@@ -322,36 +350,39 @@ impl DistributedGcService for GCServiceHandlers {
 
         // Build filter
         let mut filter = LeaseFilter::default();
-        
+
         if !req.service_id.is_empty() {
             filter.service_id = Some(req.service_id);
         }
-        
+
         if req.object_type != 0 {
             if let Ok(object_type) = ObjectType::try_from(req.object_type) {
                 filter.object_type = Some(object_type);
             }
         }
-        
+
         if req.state != 0 {
             if let Ok(state) = LeaseState::try_from(req.state) {
                 filter.state = Some(state);
             }
         }
 
-        let limit = if req.limit > 0 { Some(req.limit as usize) } else { None };
+        let limit = if req.limit > 0 {
+            Some(req.limit as usize)
+        } else {
+            None
+        };
 
         // FIXED: Use Some(filter) instead of filter, and remove offset parameter
         match self.storage.list_leases(Some(filter), limit).await {
             Ok(leases) => {
-                let lease_infos: Vec<LeaseInfo> = leases
-                    .iter()
-                    .map(|lease| lease.into())
-                    .collect();
+                let lease_infos: Vec<LeaseInfo> = leases.iter().map(|lease| lease.into()).collect();
 
                 let duration = start_time.elapsed();
-                self.metrics.record_grpc_request_duration("list_leases", duration);
-                self.metrics.increment_grpc_request("list_leases", "success");
+                self.metrics
+                    .record_grpc_request_duration("list_leases", duration);
+                self.metrics
+                    .increment_grpc_request("list_leases", "success");
 
                 Ok(Response::new(ListLeasesResponse {
                     leases: lease_infos,
@@ -377,10 +408,12 @@ impl DistributedGcService for GCServiceHandlers {
         match self.storage.health_check().await {
             Ok(healthy) => {
                 let stats = self.storage.get_stats().await.unwrap_or_default();
-                
+
                 let duration = start_time.elapsed();
-                self.metrics.record_grpc_request_duration("health_check", duration);
-                self.metrics.increment_grpc_request("health_check", "success");
+                self.metrics
+                    .record_grpc_request_duration("health_check", duration);
+                self.metrics
+                    .increment_grpc_request("health_check", "success");
 
                 Ok(Response::new(HealthCheckResponse {
                     healthy,
@@ -409,8 +442,10 @@ impl DistributedGcService for GCServiceHandlers {
         match self.storage.get_stats().await {
             Ok(stats) => {
                 let duration = start_time.elapsed();
-                self.metrics.record_grpc_request_duration("get_metrics", duration);
-                self.metrics.increment_grpc_request("get_metrics", "success");
+                self.metrics
+                    .record_grpc_request_duration("get_metrics", duration);
+                self.metrics
+                    .increment_grpc_request("get_metrics", "success");
 
                 Ok(Response::new(MetricsResponse {
                     total_leases_created: self.metrics.leases_created_total.get() as u64,
@@ -420,10 +455,14 @@ impl DistributedGcService for GCServiceHandlers {
                     total_cleanup_operations: self.metrics.cleanup_operations_total.get() as u64,
                     failed_cleanup_operations: self.metrics.cleanup_failures_total.get() as u64,
                     active_leases: stats.active_leases as u64,
-                    leases_by_service: stats.leases_by_service.into_iter()
+                    leases_by_service: stats
+                        .leases_by_service
+                        .into_iter()
                         .map(|(k, v)| (k, v as u64))
                         .collect(),
-                    leases_by_type: stats.leases_by_type.into_iter()
+                    leases_by_type: stats
+                        .leases_by_type
+                        .into_iter()
                         .map(|(k, v)| (k, v as u64))
                         .collect(),
                 }))
@@ -490,10 +529,10 @@ mod tests {
         let metrics = Metrics::new();
 
         let handlers = GCServiceHandlers::new(storage, config, metrics);
-        
+
         let request = Request::new(HealthCheckRequest {});
         let response = handlers.health_check(request).await.unwrap();
-        
+
         assert!(response.into_inner().healthy);
     }
 }

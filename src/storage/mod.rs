@@ -27,7 +27,11 @@ pub trait Storage: Send + Sync {
     async fn delete_lease(&self, lease_id: &str) -> Result<()>;
 
     /// List leases with optional filtering
-    async fn list_leases(&self, filter: Option<LeaseFilter>, limit: Option<usize>) -> Result<Vec<Lease>>;
+    async fn list_leases(
+        &self,
+        filter: Option<LeaseFilter>,
+        limit: Option<usize>,
+    ) -> Result<Vec<Lease>>;
 
     /// Count leases matching the given filter
     async fn count_leases(&self, filter: LeaseFilter) -> Result<usize>;
@@ -80,7 +84,7 @@ pub async fn create_storage(config: &Config) -> Result<Arc<dyn Storage>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lease::{ObjectType, LeaseFilter};
+    use crate::lease::{LeaseFilter, ObjectType};
     use std::collections::HashMap;
 
     async fn test_storage_backend(storage: Arc<dyn Storage>) {
@@ -151,7 +155,7 @@ mod tests {
 
         let result = create_storage(&config).await;
         assert!(result.is_err());
-        
+
         if let Err(GCError::Configuration(msg)) = result {
             assert!(msg.contains("Unsupported storage backend"));
         } else {
