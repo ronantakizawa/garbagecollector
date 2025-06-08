@@ -31,11 +31,7 @@ pub struct GCService {
 }
 
 impl GCService {
-    pub fn new(
-        storage: Arc<dyn Storage>,
-        config: Arc<Config>,
-        metrics: Arc<Metrics>,
-    ) -> Self {
+    pub fn new(storage: Arc<dyn Storage>, config: Arc<Config>, metrics: Arc<Metrics>) -> Self {
         Self {
             storage,
             config,
@@ -63,14 +59,14 @@ impl GCService {
     /// Shutdown the service gracefully
     pub async fn shutdown(&self) -> Result<()> {
         info!("🛑 Shutting down GarbageTruck service...");
-        
+
         if let Some(ref shutdown_tx) = self.shutdown_tx {
             let _ = shutdown_tx.send(());
         }
-        
+
         // Give a moment for cleanup tasks to finish
         tokio::time::sleep(Duration::from_millis(100)).await;
-        
+
         info!("✅ GarbageTruck service shutdown complete");
         Ok(())
     }
@@ -93,14 +89,17 @@ impl GCService {
         if self.config.metrics.enabled {
             let metrics_addr = format!("0.0.0.0:{}", self.config.metrics.port);
             let metrics = self.metrics.clone();
-            
+
             tokio::spawn(async move {
                 if let Err(e) = start_metrics_server(metrics_addr, metrics).await {
                     error!("❌ Metrics server failed: {}", e);
                 }
             });
-            
-            info!("📊 Metrics server started on port {}", self.config.metrics.port);
+
+            info!(
+                "📊 Metrics server started on port {}",
+                self.config.metrics.port
+            );
         }
 
         // Create and start the gRPC server
@@ -144,24 +143,24 @@ impl GCService {
         let config = self.config.clone();
         let metrics = self.metrics.clone();
         let mut shutdown_rx = self.shutdown_tx.as_ref().map(|tx| tx.subscribe());
-        
+
         // Create cleanup executor
         let cleanup_executor = CleanupExecutor::new(
             Duration::from_secs(config.cleanup.default_timeout_seconds),
             config.cleanup.default_max_retries,
             Duration::from_secs(config.cleanup.default_retry_delay_seconds),
         );
-        
+
         // Start background cleanup task
         tokio::spawn(async move {
-            let mut cleanup_interval = interval(Duration::from_secs(config.gc.cleanup_interval_seconds));
-            
+            let mut cleanup_interval =
+                interval(Duration::from_secs(config.gc.cleanup_interval_seconds));
+
             info!(
                 "🧹 Starting cleanup loop (interval: {}s, grace: {}s)",
-                config.gc.cleanup_interval_seconds,
-                config.gc.cleanup_grace_period_seconds
+                config.gc.cleanup_interval_seconds, config.gc.cleanup_grace_period_seconds
             );
-            
+
             loop {
                 tokio::select! {
                     _ = cleanup_interval.tick() => {
@@ -194,10 +193,10 @@ impl GCService {
                     }
                 }
             }
-            
+
             info!("🧹 Cleanup loop stopped");
         });
-        
+
         info!("✅ Cleanup loop started in background");
     }
 }
@@ -210,30 +209,33 @@ async fn run_cleanup_cycle(
     _metrics: &Arc<Metrics>,
 ) -> Result<(usize, usize)> {
     debug!("🔍 Starting cleanup cycle");
-    
+
     // Get all leases
     let all_leases = storage.list_leases(None, Some(1000)).await?;
     let grace_period = Duration::from_secs(config.gc.cleanup_grace_period_seconds);
-    
+
     let mut expired_count = 0;
     let mut cleanup_candidates = Vec::new();
-    
+
     // Process each lease
     for mut lease in all_leases {
         match lease.state {
             LeaseState::Active if lease.is_expired() => {
                 // Mark as expired
                 lease.expire();
-                
+
                 // Store lease info before the storage call (in case update_lease takes ownership)
                 let lease_id = lease.lease_id.clone();
                 let object_id = lease.object_id.clone();
-                
+
                 if let Err(e) = storage.update_lease(lease).await {
                     warn!("Failed to update expired lease {}: {}", lease_id, e);
                 } else {
                     expired_count += 1;
-                    debug!("⏰ Marked lease {} as expired (object: {})", lease_id, object_id);
+                    debug!(
+                        "⏰ Marked lease {} as expired (object: {})",
+                        lease_id, object_id
+                    );
                 }
             }
             LeaseState::Expired => {
@@ -249,9 +251,15 @@ async fn run_cleanup_cycle(
                         cleanup_candidates.push(lease);
                     } else {
                         // No cleanup config, just remove from storage
-                        debug!("🗑️ Lease {} has no cleanup config, removing from storage", lease.lease_id);
+                        debug!(
+                            "🗑️ Lease {} has no cleanup config, removing from storage",
+                            lease.lease_id
+                        );
                         if let Err(e) = storage.delete_lease(&lease.lease_id).await {
-                            warn!("Failed to delete lease {} from storage: {}", lease.lease_id, e);
+                            warn!(
+                                "Failed to delete lease {} from storage: {}",
+                                lease.lease_id, e
+                            );
                         }
                     }
                 }
@@ -259,46 +267,62 @@ async fn run_cleanup_cycle(
             LeaseState::Released => {
                 // Released leases with cleanup config should be cleaned immediately
                 if lease.cleanup_config.is_some() {
-                    debug!("🎯 Released lease {} needs immediate cleanup (object: {})", lease.lease_id, lease.object_id);
+                    debug!(
+                        "🎯 Released lease {} needs immediate cleanup (object: {})",
+                        lease.lease_id, lease.object_id
+                    );
                     cleanup_candidates.push(lease);
                 } else {
                     // No cleanup config, just remove from storage
                     if let Err(e) = storage.delete_lease(&lease.lease_id).await {
-                        warn!("Failed to delete released lease {} from storage: {}", lease.lease_id, e);
+                        warn!(
+                            "Failed to delete released lease {} from storage: {}",
+                            lease.lease_id, e
+                        );
                     }
                 }
             }
             _ => {}
         }
     }
-    
+
     if cleanup_candidates.is_empty() {
         if expired_count > 0 {
-            debug!("⏰ Marked {} leases as expired, no cleanup needed this cycle", expired_count);
+            debug!(
+                "⏰ Marked {} leases as expired, no cleanup needed this cycle",
+                expired_count
+            );
         }
         return Ok((expired_count, 0));
     }
-    
-    info!("🧹 Processing {} cleanup candidates", cleanup_candidates.len());
-    
+
+    info!(
+        "🧹 Processing {} cleanup candidates",
+        cleanup_candidates.len()
+    );
+
     // Log cleanup candidates for debugging
     for lease in &cleanup_candidates {
         debug!(
             "📋 Cleanup candidate: {} (object: {}, config: {})",
             lease.lease_id,
             lease.object_id,
-            lease.cleanup_config.as_ref()
+            lease
+                .cleanup_config
+                .as_ref()
                 .map(|c| format!("endpoint={}", c.cleanup_http_endpoint))
                 .unwrap_or_else(|| "none".to_string())
         );
     }
-    
+
     // Execute cleanup
-    let cleanup_results = cleanup_executor.cleanup_batch(cleanup_candidates.clone()).await;
-    
+    let cleanup_results = cleanup_executor
+        .cleanup_batch(cleanup_candidates.clone())
+        .await;
+
     let mut successful_cleanups = 0;
     let mut failed_cleanups = 0;
-    
+
     // Process cleanup results
     for (lease, result) in cleanup_candidates.iter().zip(cleanup_results.iter()) {
         if result.success {
@@ -307,7 +331,10 @@ async fn run_cleanup_cycle(
                 warn!("Failed to delete cleaned lease {}: {}", lease.lease_id, e);
             } else {
                 successful_cleanups += 1;
-                info!("✅ Successfully cleaned up lease {} (object: {})", lease.lease_id, lease.object_id);
+                info!(
+                    "✅ Successfully cleaned up lease {} (object: {})",
+                    lease.lease_id, lease.object_id
+                );
             }
         } else {
             failed_cleanups += 1;
@@ -317,11 +344,11 @@ async fn run_cleanup_cycle(
             );
         }
     }
-    
+
     if failed_cleanups > 0 {
         warn!("⚠️ {} cleanups failed this cycle", failed_cleanups);
     }
-    
+
     Ok((expired_count, successful_cleanups))
 }
 
@@ -334,14 +361,12 @@ async fn start_metrics_server(addr: String, metrics: Arc<Metrics>) -> Result<()>
         .and(warp::any().map(move || metrics.clone()))
         .and_then(handle_metrics_request);
 
-    let health_route = warp::path("health")
-        .and(warp::get())
-        .map(|| {
-            warp::reply::json(&serde_json::json!({
-                "status": "ok",
-                "service": "garbagetruck-metrics"
-            }))
-        });
+    let health_route = warp::path("health").and(warp::get()).map(|| {
+        warp::reply::json(&serde_json::json!({
+            "status": "ok",
+            "service": "garbagetruck-metrics"
+        }))
+    });
 
     let routes = metrics_route.or(health_route);
 
@@ -384,7 +409,7 @@ impl Metrics {
              # TYPE garbagetruck_active_leases gauge\n\
              garbagetruck_active_leases {}\n",
             0, // Replace with actual lease count from your metrics
-            0, // Replace with actual cleanup count from your metrics  
+            0, // Replace with actual cleanup count from your metrics
             0  // Replace with actual active lease count from your metrics
         )
     }
