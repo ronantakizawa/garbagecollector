@@ -24,7 +24,6 @@ exclude = [
     "whitepaper.pdf",
     "prometheus.yml",
     "Dockerfile",
-    "simulation/",
     "ARCHITECTURE.md"
 ]
 
