@@ -152,3 +152,13 @@ export GC_CLEANUP_TIMEOUT=30
 export GC_CLEANUP_MAX_RETRIES=3
 export GC_CLEANUP_RETRY_DELAY=5
 ```
+
+### WAL
+```bash
+export GC_STORAGE_BACKEND=persistent_file 
+export GC_ENABLE_WAL=true 
+export GC_DATA_DIRECTORY=/tmp/garbagetruck-data 
+export GC_WAL_PATH=/tmp/garbagetruck-data/garbagetruck.wal 
+export GC_WAL_SYNC_POLICY=every_write 
+export GC_ENABLE_AUTO_RECOVERY=true
+```

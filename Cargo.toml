@@ -1,6 +1,6 @@
 [package]
 name = "garbagetruck"  
-version = "0.2.0"
+version = "0.1.4"
 edition = "2021"
 authors = ["Ronan Takizawa <ronantakizawa@gmail.com>"]
 description = "A lease-based garbage collection sidecar for distributed systems with persistent storage and recovery"
@@ -20,7 +20,12 @@ exclude = [
     "benchmarks/",
     "*.log",
     "example_data*/",
-    "test_data/"
+    "test_data/",
+    "whitepaper.pdf",
+    "prometheus.yml",
+    "Dockerfile",
+    "simulation/",
+    "ARCHITECTURE.md"
 ]
 
 [lib]

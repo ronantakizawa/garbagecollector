@@ -222,7 +222,7 @@ impl FilePersistentStorage {
         let wal_path = Path::new(&config.wal_path);
         
         if !wal_path.exists() {
-            return Ok(0); // Start from 0 if no WAL exists
+            return Ok(0);
         }
 
         let file = File::open(wal_path).await.map_err(|e| {
@@ -232,23 +232,16 @@ impl FilePersistentStorage {
         let reader = BufReader::new(file);
         let mut lines = reader.lines();
         let mut max_sequence = 0u64;
-        let mut has_entries = false;
 
         while let Some(line) = lines.next_line().await.map_err(|e| {
             GCError::Storage(anyhow::anyhow!("Failed to read WAL line: {}", e))
         })? {
             if let Ok(entry) = serde_json::from_str::<WALEntry>(&line) {
                 max_sequence = max_sequence.max(entry.sequence_number);
-                has_entries = true;
             }
         }
 
-        // If we have entries, next sequence is max + 1, otherwise start at 0
-        if has_entries {
-            Ok(max_sequence + 1)
-        } else {
-            Ok(0)
-        }
+        Ok(max_sequence + 1)
     }
 
     /// Create compressed snapshot
@@ -331,31 +324,17 @@ impl PersistentStorage for FilePersistentStorage {
         // Initialize WAL writer
         self.initialize_wal_writer(config).await?;
 
-        // Perform recovery if needed (but only if WAL exists)
-        let recovery_info = if next_sequence > 0 {
-            self.replay_wal(0).await?
-        } else {
-            // No WAL to replay, create empty recovery info
-            RecoveryInfo {
-                entries_replayed: 0,
-                leases_recovered: 0,
-                corrupted_entries: 0,
-                recovery_start: Utc::now(),
-                recovery_end: Utc::now(),
-                last_sequence_number: 0,
-                warnings: Vec::new(),
-            }
-        };
-        
+        // Perform recovery if needed
+        let recovery_info = self.replay_wal(0).await?;
         *self.recovery_info.write().await = Some(recovery_info.clone());
 
         // Start background tasks
         self.start_background_tasks().await;
 
         info!(
-            "Persistent storage initialized: {} leases recovered, current sequence: {}",
+            "Persistent storage initialized: {} leases recovered, next sequence: {}",
             recovery_info.leases_recovered,
-            self.sequence_counter.load(Ordering::Relaxed)
+            next_sequence
         );
 
         Ok(())
@@ -677,37 +656,7 @@ impl PersistentStorage for FilePersistentStorage {
     }
 
     async fn current_sequence_number(&self) -> Result<u64> {
-        // Return the current sequence number (the next one to be used)
-        // This represents how many entries have been written
         Ok(self.sequence_counter.load(Ordering::Relaxed))
-    }
-
-    async fn wal_entry_count(&self) -> Result<u64> {
-        // Count actual entries in the WAL file
-        let config = self.config.read().await;
-        let wal_path = Path::new(&config.wal_path);
-        
-        if !wal_path.exists() {
-            return Ok(0);
-        }
-
-        let file = File::open(wal_path).await.map_err(|e| {
-            GCError::Storage(anyhow::anyhow!("Failed to open WAL for counting: {}", e))
-        })?;
-
-        let reader = BufReader::new(file);
-        let mut lines = reader.lines();
-        let mut count = 0u64;
-
-        while let Some(line) = lines.next_line().await.map_err(|e| {
-            GCError::Storage(anyhow::anyhow!("Failed to read WAL line: {}", e))
-        })? {
-            if !line.trim().is_empty() && serde_json::from_str::<WALEntry>(&line).is_ok() {
-                count += 1;
-            }
-        }
-
-        Ok(count)
     }
 
     async fn sync_wal(&self) -> Result<()> {

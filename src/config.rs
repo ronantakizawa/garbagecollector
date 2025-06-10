@@ -64,6 +64,23 @@ pub struct StorageConfig {
     pub wal_compaction_threshold: u64,
 }
 
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            backend: "memory".to_string(),
+            persistent_config: None,
+            enable_wal: false,
+            enable_auto_recovery: false,
+            #[cfg(feature = "persistent")]
+            recovery_strategy: crate::recovery::RecoveryStrategy::Conservative,
+            #[cfg(not(feature = "persistent"))]
+            recovery_strategy: "conservative".to_string(),
+            snapshot_interval_seconds: 3600, // 1 hour
+            wal_compaction_threshold: 10000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CleanupConfig {
     /// Default timeout for cleanup operations (in seconds)

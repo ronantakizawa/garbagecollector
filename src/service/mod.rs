@@ -15,7 +15,7 @@ use crate::lease::LeaseState;
 use crate::metrics::Metrics;
 use crate::proto::distributed_gc_service_server::DistributedGcServiceServer;
 use crate::recovery::manager::{RecoveryManager, RecoveryTrigger};
-use crate::storage::{create_persistent_storage, create_storage, PersistentStorage, Storage, StorageConfig};
+use crate::storage::{create_persistent_storage, create_storage, PersistentStorage, Storage};
 
 pub mod handlers;
 pub mod validation;
@@ -43,7 +43,7 @@ impl GCService {
         
         // Create persistent storage if using persistent backend
         let persistent_storage = if config.storage.backend == "persistent_file" {
-            let storage_config = StorageConfig {
+            let storage_config = crate::config::StorageConfig {
                 backend: config.storage.backend.clone(),
                 persistent_config: config.storage.persistent_config.clone(),
                 enable_wal: config.storage.enable_wal,
@@ -63,10 +63,10 @@ impl GCService {
             if config.storage.enable_auto_recovery {
                 let recovery_config = config.recovery.clone().unwrap_or_default();
                 Some(Arc::new(RecoveryManager::new(
-                    persistent.clone(),  // 1st: Arc<dyn PersistentStorage>
-                    storage.clone(),     // 2nd: Arc<dyn Storage> 
-                    recovery_config,     // 3rd: RecoveryConfig
-                    metrics.clone(),     // 4th: Arc<Metrics>
+                    persistent.clone(),
+                    storage.clone(),
+                    recovery_config,
+                    metrics.clone(),
                 )))
             } else {
                 None

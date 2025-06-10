@@ -1,59 +1,35 @@
-// src/bin/server/main.rs - Fixed server binary that actually starts the service
+// src/bin/server/main.rs - Fixed server main with proper backend handling
 
-use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{error, info, Level};
-use tracing_subscriber;
-
-use garbagetruck::{
-    config::Config,
-    error::Result,
-    metrics::Metrics,
-    service::GCService,
-    startup::ApplicationStartup,
-};
+use tracing::{error, info};
+use garbagetruck::{Config, GCService, Metrics};
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
     tracing_subscriber::fmt()
-        .with_max_level(Level::INFO)
-        .with_target(false)
+        .with_env_filter("garbagetruck=info,server=info")
         .init();
 
-    info!("🚀 Starting GarbageTruck server");
+    info!("🚛 Starting GarbageTruck Server");
 
-    // Load configuration
-    let config = match Config::from_env() {
-        Ok(config) => {
-            info!("📋 Configuration Summary:");
-            info!("  Server endpoint: {}:{}", config.server.host, config.server.port);
-            info!("  Storage backend: {}", config.storage.backend);
-            info!("  Default lease duration: {}s", config.gc.default_lease_duration_seconds);
-            
-            #[cfg(feature = "persistent")]
-            {
-                info!("  WAL enabled: {}", config.storage.enable_wal);
-                info!("  Auto-recovery: {}", config.storage.enable_auto_recovery);
-            }
-            
-            info!("  Cleanup interval: {}s", config.gc.cleanup_interval_seconds);
-            info!("  Max leases per service: {}", config.gc.max_leases_per_service);
-            
-            if config.metrics.enabled {
-                info!("  Metrics enabled: true");
-                info!("  Metrics port: {}", config.metrics.port);
-            } else {
-                info!("  Metrics enabled: false");
-            }
-            
-            config
-        }
+    // Load configuration from environment
+    let mut config = match Config::from_env() {
+        Ok(config) => config,
         Err(e) => {
             error!("❌ Failed to load configuration: {}", e);
             std::process::exit(1);
         }
     };
+
+    // Override backend if persistent features are not available
+    #[cfg(not(feature = "persistent"))]
+    {
+        if config.storage.backend == "persistent_file" {
+            info!("⚠️ Persistent storage requested but feature not enabled, falling back to memory backend");
+            config.storage.backend = "memory".to_string();
+        }
+    }
 
     // Validate configuration
     if let Err(e) = config.validate() {
@@ -61,46 +37,51 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    info!("✅ Configuration loaded and validated successfully");
+    // Show configuration summary
+    let summary = config.summary();
+    info!("📋 Configuration Summary:");
+    info!("   - Server: {}", summary.server_endpoint);
+    info!("   - Storage backend: {}", summary.storage_backend);
+    info!("   - WAL enabled: {}", summary.storage_features.wal_enabled);
+    info!("   - Auto-recovery: {}", summary.storage_features.auto_recovery_enabled);
+    info!("   - Metrics enabled: {}", summary.metrics_enabled);
 
-    // Parse server address
-    let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port)
-        .parse()
-        .unwrap_or_else(|e| {
-            error!("❌ Invalid server address: {}", e);
-            std::process::exit(1);
-        });
-
-    // Method 1: Use ApplicationStartup (recommended)
-    let startup = ApplicationStartup::new(config)?;
-    
-    info!("🌐 Starting server on {}", addr);
-    
-    // This will block until shutdown
-    if let Err(e) = startup.start_and_run(addr).await {
-        error!("❌ Server failed: {}", e);
-        std::process::exit(1);
-    }
-
-    info!("👋 GarbageTruck server shut down gracefully");
-    Ok(())
-}
-
-// Alternative approach if you want direct service control:
-#[allow(dead_code)]
-async fn alternative_startup() -> Result<()> {
-    let config = Config::from_env()?;
-    config.validate()?;
-    
     let config = Arc::new(config);
     let metrics = Metrics::new();
-    
-    // Create service directly
-    let service = GCService::new(config.clone(), metrics).await?;
-    
-    // Start service
-    let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port).parse().unwrap();
-    service.start(addr).await?;
-    
+
+    // Create and start the service
+    match GCService::new(config.clone(), metrics).await {
+        Ok(service) => {
+            let addr = format!("{}:{}", config.server.host, config.server.port)
+                .parse()
+                .expect("Invalid server address");
+
+            info!("🚀 Starting server on {}", addr);
+            
+            // Show feature information
+            let features = garbagetruck::Features::new();
+            info!("🔧 Available features: {:?}", features.list_enabled());
+
+            if let Err(e) = service.start(addr).await {
+                error!("❌ Server failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            error!("❌ Failed to create service: {}", e);
+            
+            // Provide helpful error messages
+            match e {
+                garbagetruck::GCError::Configuration(ref msg) if msg.contains("persistent") => {
+                    error!("💡 Hint: To use persistent storage, compile with: cargo run --bin garbagetruck-server --features persistent");
+                    error!("💡 Or set GC_STORAGE_BACKEND=memory to use memory storage");
+                }
+                _ => {}
+            }
+            
+            std::process::exit(1);
+        }
+    }
+
     Ok(())
 }

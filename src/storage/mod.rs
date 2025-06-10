@@ -7,7 +7,7 @@ use crate::config::Config;
 use crate::error::{GCError, Result};
 use crate::lease::{Lease, LeaseFilter, LeaseStats, ObjectType};
 
-pub mod memory;
+mod memory;
 pub mod persistent;
 pub mod file_persistent;
 
@@ -36,45 +36,6 @@ pub trait Storage: Send + Sync {
     async fn count_active_leases_for_service(&self, service_id: &str) -> Result<usize>;
     async fn mark_lease_expired(&self, lease_id: &str) -> Result<()>;
     async fn mark_lease_released(&self, lease_id: &str) -> Result<()>;
-}
-
-/// Enhanced storage configuration with persistence options
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct StorageConfig {
-    /// Storage backend type: "memory", "persistent_file"
-    pub backend: String,
-    /// Persistent storage configuration (when using persistent backends)
-    pub persistent_config: Option<PersistentStorageConfig>,
-    /// Enable write-ahead logging
-    pub enable_wal: bool,
-    /// Enable automatic recovery on startup
-    pub enable_auto_recovery: bool,
-    /// Recovery strategy
-    #[cfg(feature = "persistent")]
-    pub recovery_strategy: crate::recovery::RecoveryStrategy,
-    #[cfg(not(feature = "persistent"))]
-    pub recovery_strategy: String, // Fallback for when persistent feature is disabled
-    /// Automatic snapshot interval (seconds, 0 to disable)
-    pub snapshot_interval_seconds: u64,
-    /// WAL compaction threshold (entries)
-    pub wal_compaction_threshold: u64,
-}
-
-impl Default for StorageConfig {
-    fn default() -> Self {
-        Self {
-            backend: "memory".to_string(),
-            persistent_config: None,
-            enable_wal: false,
-            enable_auto_recovery: false,
-            #[cfg(feature = "persistent")]
-            recovery_strategy: crate::recovery::RecoveryStrategy::Conservative,
-            #[cfg(not(feature = "persistent"))]
-            recovery_strategy: "conservative".to_string(),
-            snapshot_interval_seconds: 3600, // 1 hour
-            wal_compaction_threshold: 10000,
-        }
-    }
 }
 
 /// Create storage backend based on configuration
@@ -109,7 +70,7 @@ pub async fn create_storage(config: &Config) -> Result<Arc<dyn Storage>> {
 
 /// Create persistent storage with recovery capabilities
 pub async fn create_persistent_storage(
-    config: &StorageConfig
+    config: &crate::config::StorageConfig
 ) -> Result<Arc<dyn PersistentStorage>> {
     match config.backend.as_str() {
         "persistent_file" => {
@@ -183,29 +144,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_storage_factory() {
-        let config = crate::config::Config {
-            storage: crate::config::StorageConfig {
-                backend: "memory".to_string(),
-                persistent_config: None,
-                enable_wal: false,
-                enable_auto_recovery: false,
-                #[cfg(feature = "persistent")]
-                recovery_strategy: crate::recovery::RecoveryStrategy::Conservative,
-                #[cfg(not(feature = "persistent"))]
-                recovery_strategy: "conservative".to_string(),
-                snapshot_interval_seconds: 0,
-                wal_compaction_threshold: 1000,
-            },
-            ..Default::default()
-        };
-
+        let config = crate::config::Config::default();
         let storage = create_storage(&config).await.unwrap();
         test_storage_backend(storage).await;
     }
 
     #[tokio::test]
     async fn test_persistent_storage_factory() {
-        let config = StorageConfig {
+        let storage_config = crate::config::StorageConfig {
             backend: "persistent_file".to_string(),
             persistent_config: Some(PersistentStorageConfig::default()),
             enable_wal: true,
@@ -214,13 +160,13 @@ mod tests {
             recovery_strategy: crate::recovery::RecoveryStrategy::Fast,
             #[cfg(not(feature = "persistent"))]
             recovery_strategy: "fast".to_string(),
-            snapshot_interval_seconds: 0,
-            wal_compaction_threshold: 1000,
+            snapshot_interval_seconds: 3600,
+            wal_compaction_threshold: 10000,
         };
 
         // This would fail in the test environment without proper file setup,
         // but demonstrates the API
-        let _result = create_persistent_storage(&config).await;
+        let _result = create_persistent_storage(&storage_config).await;
         // In a real test, you'd set up a temporary directory and verify the storage works
     }
 
@@ -236,8 +182,8 @@ mod tests {
                 recovery_strategy: crate::recovery::RecoveryStrategy::Conservative,
                 #[cfg(not(feature = "persistent"))]
                 recovery_strategy: "conservative".to_string(),
-                snapshot_interval_seconds: 0,
-                wal_compaction_threshold: 1000,
+                snapshot_interval_seconds: 3600,
+                wal_compaction_threshold: 10000,
             },
             ..Default::default()
         };

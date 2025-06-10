@@ -150,12 +150,12 @@ pub enum WALSyncPolicy {
 impl Default for PersistentStorageConfig {
     fn default() -> Self {
         Self {
-            data_directory: "./data".to_string(),
-            wal_path: "./data/garbagetruck.wal".to_string(),
-            snapshot_path: "./data/garbagetruck.snapshot".to_string(),
+            data_directory: "/tmp/garbagetruck-data".to_string(),
+            wal_path: "/tmp/garbagetruck-data/garbagetruck.wal".to_string(),
+            snapshot_path: "/tmp/garbagetruck-data/garbagetruck.snapshot".to_string(),
             max_wal_size: 100 * 1024 * 1024, // 100MB
-            sync_policy: WALSyncPolicy::EveryN(10),
-            snapshot_interval: 300, // 5 minutes
+            sync_policy: WALSyncPolicy::EveryWrite, // Force immediate sync for safety
+            snapshot_interval: 3600, // 1 hour
             max_wal_files: 5,
             compress_snapshots: true,
         }
@@ -207,12 +207,6 @@ pub trait PersistentStorage: Send + Sync {
 
     /// Get current WAL sequence number
     async fn current_sequence_number(&self) -> Result<u64>;
-
-    /// Get the number of entries actually written to WAL
-    async fn wal_entry_count(&self) -> Result<u64> {
-        // Default implementation - can be overridden
-        self.current_sequence_number().await
-    }
 
     /// Force sync WAL to disk
     async fn sync_wal(&self) -> Result<()>;

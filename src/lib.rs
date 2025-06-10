@@ -30,7 +30,7 @@ pub mod proto {
 }
 
 // Re-export commonly used items for convenience
-pub use config::Config;
+pub use config::{Config, StorageConfig};
 pub use error::{GCError, Result};
 pub use lease::{CleanupConfig, Lease, LeaseState, ObjectType};
 pub use service::GCService;

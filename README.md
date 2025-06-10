@@ -76,7 +76,7 @@ garbagetruck lease create --object-id "user-session" --object-type websocket-ses
 ```
 ### 4. List leases
 ```bash
-garbagetruck lease list --service my-service --limit 20
+garbagetruck lease list --limit 20
 ```
 
 ## gRPC Functionality Testing 

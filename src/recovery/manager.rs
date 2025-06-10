@@ -677,7 +677,7 @@ impl RecoveryAPI {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::memory::MemoryStorage;
+    use crate::storage::MemoryStorage;
     use std::sync::Arc;
 
     async fn create_test_recovery_manager() -> RecoveryManager {
