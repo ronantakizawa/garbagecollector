@@ -1,15 +1,15 @@
 [package]
 name = "garbagetruck"  
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 authors = ["Ronan Takizawa <ronantakizawa@gmail.com>"]
-description = "A lease-based garbage collection sidecar for distributed systems"
+description = "A lease-based garbage collection sidecar for distributed systems with persistent storage and recovery"
 license = "MIT"
 readme = "README.md"
 homepage = "https://github.com/ronantakizawa/garbagetruck"
 repository = "https://github.com/ronantakizawa/garbagetruck" 
 documentation = "https://docs.rs/garbagetruck"
-keywords = ["grpc", "gc", "sidecar", "microservices", "lease"]
+keywords = ["grpc", "gc", "sidecar", "microservices", "lease", "persistent", "recovery"]
 categories = ["network-programming", "development-tools", "command-line-utilities"]
 exclude = [
     "target/",
@@ -18,7 +18,9 @@ exclude = [
     "docker/",
     "scripts/",
     "benchmarks/",
-    "*.log"
+    "*.log",
+    "example_data*/",
+    "test_data/"
 ]
 
 [lib]
@@ -76,6 +78,11 @@ fastrand = "2.0"
 # CLI dependencies (optional)
 clap = { version = "4.4", features = ["derive", "env"], optional = true }
 
+# Persistent storage dependencies
+flate2 = "1.0"          # Compression for snapshots
+md5 = "0.7"             # Checksums for integrity verification
+tempfile = "3.8"        # Temporary directories for testing and examples
+
 [dev-dependencies]
 # Testing framework
 tokio-test = "0.4"
@@ -92,11 +99,11 @@ criterion = { version = "0.5", features = ["html_reports"] }
 tonic-build = "0.12"
 
 [features]
-default = ["client","server"]
+default = ["client", "server", "persistent"]
 client = ["clap"]
 server = []
-# Remove postgres feature entirely
-full = ["client", "server"]
+persistent = []  # Enable persistent storage features
+full = ["client", "server", "persistent"]
 
 # Server binary
 [[bin]]
@@ -135,3 +142,8 @@ required-features = ["client"]
 name = "server_setup"
 path = "examples/server_setup.rs"
 required-features = ["server"]
+
+[[example]]
+name = "persistent_storage_example"
+path = "examples/persistent_storage_example.rs"
+required-features = ["persistent"]

@@ -1,4 +1,4 @@
-// src/startup.rs - Complete fixed version
+// src/startup.rs - Fixed startup implementation
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -26,26 +26,28 @@ impl ApplicationStartup {
         Ok(Self { config, metrics })
     }
 
-    /// Start the complete application
-    pub async fn start(&self) -> Result<()> {
+    /// Start the complete application and return the service
+    pub async fn start(&self) -> Result<GCService> {
         info!("🚀 Starting GarbageTruck application");
 
         // Check external dependencies
         self.check_dependencies().await?;
 
         // Initialize storage
-        let storage = self.initialize_storage().await?;
+        let _storage = self.initialize_storage().await?;
 
-        // Create and start the main service
-        let gc_service = GCService::new(storage, self.config.clone(), self.metrics.clone());
-
-        let addr: SocketAddr = format!("{}:{}", self.config.server.host, self.config.server.port)
-            .parse()
-            .map_err(|e| GCError::Configuration(format!("Invalid server address: {}", e)))?;
+        // Create the main service
+        let gc_service = GCService::new(self.config.clone(), self.metrics.clone()).await?;
 
         info!("✅ Application startup completed successfully");
 
-        // Start the service (this will block until shutdown)
+        // Return the service for external startup
+        Ok(gc_service)
+    }
+
+    /// Start the application and run the service
+    pub async fn start_and_run(&self, addr: SocketAddr) -> Result<()> {
+        let gc_service = self.start().await?;
         gc_service.start(addr).await
     }
 
@@ -57,7 +59,7 @@ impl ApplicationStartup {
 
         if let Err(e) = dependency_checker.check_all_dependencies().await {
             error!("❌ Dependency check failed: {}", e);
-            return Err(GCError::Storage(e)); // FIXED: Proper error conversion
+            return Err(GCError::Storage(e));
         }
 
         info!("✅ All dependencies are available");

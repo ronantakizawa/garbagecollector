@@ -83,37 +83,6 @@ async fn test_unknown_storage_backend() {
 }
 
 #[tokio::test]
-async fn test_postgres_backend_not_supported() {
-    println!("🔧 Testing postgres backend not supported...");
-
-    let mut config = Config::default();
-    config.storage.backend = "postgres".to_string();
-
-    let result = create_storage(&config).await;
-
-    match result {
-        Err(GCError::Configuration(msg)) => {
-            assert!(
-                msg.contains("Unsupported storage backend"),
-                "Error should mention unsupported backend: {}",
-                msg
-            );
-            assert!(
-                msg.contains("postgres"),
-                "Error should mention postgres: {}",
-                msg
-            );
-            assert!(
-                msg.contains("Only 'memory' is supported"),
-                "Error should mention only memory is supported: {}",
-                msg
-            );
-        }
-        _ => panic!("Expected configuration error for postgres backend"),
-    }
-}
-
-#[tokio::test]
 async fn test_case_sensitive_backend_names() {
     println!("🔤 Testing case sensitive backend names...");
 

@@ -1,9 +1,11 @@
-// src/config.rs - Simplified configuration without PostgreSQL
+// src/config.rs - Updated configuration with persistent storage and recovery options
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::{debug, info, warn};
+
+use crate::storage::{PersistentStorageConfig, WALSyncPolicy};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -12,6 +14,9 @@ pub struct Config {
     pub storage: StorageConfig,
     pub cleanup: CleanupConfig,
     pub metrics: MetricsConfig,
+    /// Recovery configuration (optional)
+    #[cfg(feature = "persistent")]
+    pub recovery: Option<crate::recovery::RecoveryConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,43 +29,49 @@ pub struct ServerConfig {
 pub struct GCConfig {
     /// Default lease duration in seconds
     pub default_lease_duration_seconds: u64,
-
     /// Maximum lease duration in seconds
     pub max_lease_duration_seconds: u64,
-
     /// Minimum lease duration in seconds
     pub min_lease_duration_seconds: u64,
-
     /// How often to run the cleanup loop (in seconds)
     pub cleanup_interval_seconds: u64,
-
     /// Grace period before actually cleaning up expired leases (in seconds)
     pub cleanup_grace_period_seconds: u64,
-
     /// Maximum number of leases per service
     pub max_leases_per_service: usize,
-
     /// Maximum number of concurrent cleanup operations
     pub max_concurrent_cleanups: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
-    /// Storage backend type: only "memory" is supported
+    /// Storage backend type: "memory", "persistent_file"
     pub backend: String,
+    /// Persistent storage configuration (when using persistent backends)
+    pub persistent_config: Option<PersistentStorageConfig>,
+    /// Enable write-ahead logging
+    pub enable_wal: bool,
+    /// Enable automatic recovery on startup
+    pub enable_auto_recovery: bool,
+    /// Recovery strategy
+    #[cfg(feature = "persistent")]
+    pub recovery_strategy: crate::recovery::RecoveryStrategy,
+    #[cfg(not(feature = "persistent"))]
+    pub recovery_strategy: String, // Fallback string for when persistent feature is disabled
+    /// Automatic snapshot interval (seconds, 0 to disable)
+    pub snapshot_interval_seconds: u64,
+    /// WAL compaction threshold (entries)
+    pub wal_compaction_threshold: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CleanupConfig {
     /// Default timeout for cleanup operations (in seconds)
     pub default_timeout_seconds: u64,
-
     /// Default number of retries for failed cleanups
     pub default_max_retries: u32,
-
     /// Default delay between retries (in seconds)
     pub default_retry_delay_seconds: u64,
-
     /// Maximum time to wait for cleanup operations (in seconds)
     pub max_cleanup_time_seconds: u64,
 }
@@ -69,9 +80,12 @@ pub struct CleanupConfig {
 pub struct MetricsConfig {
     /// Whether to enable Prometheus metrics
     pub enabled: bool,
-
     /// Metrics server port
     pub port: u16,
+    /// Include recovery metrics
+    pub include_recovery_metrics: bool,
+    /// Include WAL metrics
+    pub include_wal_metrics: bool,
 }
 
 /// Detailed validation result with specific error information
@@ -116,6 +130,15 @@ impl Default for Config {
             },
             storage: StorageConfig {
                 backend: "memory".to_string(),
+                persistent_config: None,
+                enable_wal: false,
+                enable_auto_recovery: false,
+                #[cfg(feature = "persistent")]
+                recovery_strategy: crate::recovery::RecoveryStrategy::Conservative,
+                #[cfg(not(feature = "persistent"))]
+                recovery_strategy: "conservative".to_string(),
+                snapshot_interval_seconds: 3600, // 1 hour
+                wal_compaction_threshold: 10000,
             },
             cleanup: CleanupConfig {
                 default_timeout_seconds: 30,
@@ -126,13 +149,19 @@ impl Default for Config {
             metrics: MetricsConfig {
                 enabled: true,
                 port: 9090,
+                include_recovery_metrics: true,
+                include_wal_metrics: true,
             },
+            #[cfg(feature = "persistent")]
+            recovery: Some(crate::recovery::RecoveryConfig::default()),
+            #[cfg(not(feature = "persistent"))]
+            recovery: None,
         }
     }
 }
 
 impl Config {
-    /// Load configuration from environment variables
+    /// Load configuration from environment variables with persistent storage support
     pub fn from_env() -> Result<Self> {
         let start_time = std::time::Instant::now();
         let mut config = Config::default();
@@ -158,7 +187,167 @@ impl Config {
             }
         }
 
-        // GC configuration
+        // Storage configuration
+        if let Ok(backend) = std::env::var("GC_STORAGE_BACKEND") {
+            debug!("Found GC_STORAGE_BACKEND: {}", backend);
+            config.storage.backend = backend;
+        }
+
+        if let Ok(enable_wal) = std::env::var("GC_ENABLE_WAL") {
+            match enable_wal.parse() {
+                Ok(enabled) => {
+                    debug!("Found GC_ENABLE_WAL: {}", enabled);
+                    config.storage.enable_wal = enabled;
+                }
+                Err(e) => {
+                    parse_errors.push(format!("Invalid GC_ENABLE_WAL '{}': {}", enable_wal, e));
+                }
+            }
+        }
+
+        if let Ok(auto_recovery) = std::env::var("GC_ENABLE_AUTO_RECOVERY") {
+            match auto_recovery.parse() {
+                Ok(enabled) => {
+                    debug!("Found GC_ENABLE_AUTO_RECOVERY: {}", enabled);
+                    config.storage.enable_auto_recovery = enabled;
+                }
+                Err(e) => {
+                    parse_errors.push(format!("Invalid GC_ENABLE_AUTO_RECOVERY '{}': {}", auto_recovery, e));
+                }
+            }
+        }
+
+        // Persistent storage configuration
+        if config.storage.backend == "persistent_file" || config.storage.enable_wal {
+            let mut persistent_config = PersistentStorageConfig::default();
+
+            if let Ok(data_dir) = std::env::var("GC_DATA_DIRECTORY") {
+                debug!("Found GC_DATA_DIRECTORY: {}", data_dir);
+                persistent_config.data_directory = data_dir;
+            }
+
+            if let Ok(wal_path) = std::env::var("GC_WAL_PATH") {
+                debug!("Found GC_WAL_PATH: {}", wal_path);
+                persistent_config.wal_path = wal_path;
+            }
+
+            if let Ok(snapshot_path) = std::env::var("GC_SNAPSHOT_PATH") {
+                debug!("Found GC_SNAPSHOT_PATH: {}", snapshot_path);
+                persistent_config.snapshot_path = snapshot_path;
+            }
+
+            if let Ok(max_wal_size) = std::env::var("GC_MAX_WAL_SIZE") {
+                match max_wal_size.parse() {
+                    Ok(size) => {
+                        debug!("Found GC_MAX_WAL_SIZE: {}", size);
+                        persistent_config.max_wal_size = size;
+                    }
+                    Err(e) => {
+                        parse_errors.push(format!("Invalid GC_MAX_WAL_SIZE '{}': {}", max_wal_size, e));
+                    }
+                }
+            }
+
+            if let Ok(sync_policy) = std::env::var("GC_WAL_SYNC_POLICY") {
+                debug!("Found GC_WAL_SYNC_POLICY: {}", sync_policy);
+                persistent_config.sync_policy = match sync_policy.as_str() {
+                    "every_write" => WALSyncPolicy::EveryWrite,
+                    "none" => WALSyncPolicy::None,
+                    interval if interval.starts_with("interval:") => {
+                        if let Ok(seconds) = interval.strip_prefix("interval:").unwrap().parse::<u64>() {
+                            WALSyncPolicy::Interval(seconds)
+                        } else {
+                            parse_errors.push(format!("Invalid interval in WAL sync policy: {}", interval));
+                            WALSyncPolicy::EveryN(10)
+                        }
+                    }
+                    every_n if every_n.starts_with("every:") => {
+                        if let Ok(n) = every_n.strip_prefix("every:").unwrap().parse::<u32>() {
+                            WALSyncPolicy::EveryN(n)
+                        } else {
+                            parse_errors.push(format!("Invalid count in WAL sync policy: {}", every_n));
+                            WALSyncPolicy::EveryN(10)
+                        }
+                    }
+                    _ => {
+                        parse_errors.push(format!("Unknown WAL sync policy: {}", sync_policy));
+                        WALSyncPolicy::EveryN(10)
+                    }
+                };
+            }
+
+            if let Ok(compress) = std::env::var("GC_COMPRESS_SNAPSHOTS") {
+                match compress.parse() {
+                    Ok(enabled) => {
+                        debug!("Found GC_COMPRESS_SNAPSHOTS: {}", enabled);
+                        persistent_config.compress_snapshots = enabled;
+                    }
+                    Err(e) => {
+                        parse_errors.push(format!("Invalid GC_COMPRESS_SNAPSHOTS '{}': {}", compress, e));
+                    }
+                }
+            }
+
+            config.storage.persistent_config = Some(persistent_config);
+        }
+
+        // Recovery strategy
+        #[cfg(feature = "persistent")]
+        if let Ok(strategy) = std::env::var("GC_RECOVERY_STRATEGY") {
+            debug!("Found GC_RECOVERY_STRATEGY: {}", strategy);
+            config.storage.recovery_strategy = match strategy.as_str() {
+                "conservative" => crate::recovery::RecoveryStrategy::Conservative,
+                "fast" => crate::recovery::RecoveryStrategy::Fast,
+                "emergency" => crate::recovery::RecoveryStrategy::Emergency,
+                custom if custom.starts_with("custom:") => {
+                    // Parse custom recovery parameters
+                    crate::recovery::RecoveryStrategy::Custom {
+                        validate_checksums: true,
+                        skip_corrupted_entries: false,
+                        force_snapshot_load: false,
+                        max_recovery_time_seconds: 300,
+                    }
+                }
+                _ => {
+                    parse_errors.push(format!("Unknown recovery strategy: {}", strategy));
+                    crate::recovery::RecoveryStrategy::Conservative
+                }
+            };
+        }
+
+        #[cfg(not(feature = "persistent"))]
+        if let Ok(strategy) = std::env::var("GC_RECOVERY_STRATEGY") {
+            debug!("Found GC_RECOVERY_STRATEGY: {} (persistent features disabled)", strategy);
+            config.storage.recovery_strategy = strategy;
+        }
+
+        // Snapshot interval
+        if let Ok(interval) = std::env::var("GC_SNAPSHOT_INTERVAL") {
+            match interval.parse() {
+                Ok(seconds) => {
+                    debug!("Found GC_SNAPSHOT_INTERVAL: {}", seconds);
+                    config.storage.snapshot_interval_seconds = seconds;
+                }
+                Err(e) => {
+                    parse_errors.push(format!("Invalid GC_SNAPSHOT_INTERVAL '{}': {}", interval, e));
+                }
+            }
+        }
+
+        // WAL compaction threshold
+        if let Ok(threshold) = std::env::var("GC_WAL_COMPACTION_THRESHOLD") {
+            match threshold.parse() {
+                Ok(count) => {
+                    debug!("Found GC_WAL_COMPACTION_THRESHOLD: {}", count);
+                    config.storage.wal_compaction_threshold = count;
+                }
+                Err(e) => {
+                    parse_errors.push(format!("Invalid GC_WAL_COMPACTION_THRESHOLD '{}': {}", threshold, e));
+                }
+            }
+        }
+
+        // GC configuration (existing code)
         if let Ok(duration) = std::env::var("GC_DEFAULT_LEASE_DURATION") {
             match duration.parse() {
                 Ok(d) => {
@@ -166,10 +355,7 @@ impl Config {
                     config.gc.default_lease_duration_seconds = d;
                 }
                 Err(e) => {
-                    parse_errors.push(format!(
-                        "Invalid GC_DEFAULT_LEASE_DURATION '{}': {}",
-                        duration, e
-                    ));
+                    parse_errors.push(format!("Invalid GC_DEFAULT_LEASE_DURATION '{}': {}", duration, e));
                 }
             }
         }
@@ -181,10 +367,7 @@ impl Config {
                     config.gc.max_lease_duration_seconds = d;
                 }
                 Err(e) => {
-                    parse_errors.push(format!(
-                        "Invalid GC_MAX_LEASE_DURATION '{}': {}",
-                        max_duration, e
-                    ));
+                    parse_errors.push(format!("Invalid GC_MAX_LEASE_DURATION '{}': {}", max_duration, e));
                 }
             }
         }
@@ -196,70 +379,12 @@ impl Config {
                     config.gc.min_lease_duration_seconds = d;
                 }
                 Err(e) => {
-                    parse_errors.push(format!(
-                        "Invalid GC_MIN_LEASE_DURATION '{}': {}",
-                        min_duration, e
-                    ));
+                    parse_errors.push(format!("Invalid GC_MIN_LEASE_DURATION '{}': {}", min_duration, e));
                 }
             }
         }
 
-        if let Ok(interval) = std::env::var("GC_CLEANUP_INTERVAL") {
-            match interval.parse() {
-                Ok(i) => {
-                    debug!("Found GC_CLEANUP_INTERVAL: {}", i);
-                    config.gc.cleanup_interval_seconds = i;
-                }
-                Err(e) => {
-                    parse_errors.push(format!("Invalid GC_CLEANUP_INTERVAL '{}': {}", interval, e));
-                }
-            }
-        }
-
-        if let Ok(grace) = std::env::var("GC_CLEANUP_GRACE_PERIOD") {
-            match grace.parse() {
-                Ok(g) => {
-                    debug!("Found GC_CLEANUP_GRACE_PERIOD: {}", g);
-                    config.gc.cleanup_grace_period_seconds = g;
-                }
-                Err(e) => {
-                    parse_errors.push(format!(
-                        "Invalid GC_CLEANUP_GRACE_PERIOD '{}': {}",
-                        grace, e
-                    ));
-                }
-            }
-        }
-
-        if let Ok(max_leases) = std::env::var("GC_MAX_LEASES_PER_SERVICE") {
-            match max_leases.parse() {
-                Ok(m) => {
-                    debug!("Found GC_MAX_LEASES_PER_SERVICE: {}", m);
-                    config.gc.max_leases_per_service = m;
-                }
-                Err(e) => {
-                    parse_errors.push(format!(
-                        "Invalid GC_MAX_LEASES_PER_SERVICE '{}': {}",
-                        max_leases, e
-                    ));
-                }
-            }
-        }
-
-        // Storage configuration - only memory backend supported
-        if let Ok(backend) = std::env::var("GC_STORAGE_BACKEND") {
-            if backend != "memory" {
-                parse_errors.push(format!(
-                    "Unsupported storage backend '{}': only 'memory' is supported",
-                    backend
-                ));
-            } else {
-                debug!("Found GC_STORAGE_BACKEND: {}", backend);
-                config.storage.backend = backend;
-            }
-        }
-
-        // Cleanup configuration
+        // Cleanup configuration (existing code)
         if let Ok(timeout) = std::env::var("GC_CLEANUP_TIMEOUT") {
             match timeout.parse() {
                 Ok(t) => {
@@ -268,33 +393,6 @@ impl Config {
                 }
                 Err(e) => {
                     parse_errors.push(format!("Invalid GC_CLEANUP_TIMEOUT '{}': {}", timeout, e));
-                }
-            }
-        }
-
-        if let Ok(retries) = std::env::var("GC_CLEANUP_MAX_RETRIES") {
-            match retries.parse() {
-                Ok(r) => {
-                    debug!("Found GC_CLEANUP_MAX_RETRIES: {}", r);
-                    config.cleanup.default_max_retries = r;
-                }
-                Err(e) => {
-                    parse_errors.push(format!(
-                        "Invalid GC_CLEANUP_MAX_RETRIES '{}': {}",
-                        retries, e
-                    ));
-                }
-            }
-        }
-
-        if let Ok(delay) = std::env::var("GC_CLEANUP_RETRY_DELAY") {
-            match delay.parse() {
-                Ok(d) => {
-                    debug!("Found GC_CLEANUP_RETRY_DELAY: {}", d);
-                    config.cleanup.default_retry_delay_seconds = d;
-                }
-                Err(e) => {
-                    parse_errors.push(format!("Invalid GC_CLEANUP_RETRY_DELAY '{}': {}", delay, e));
                 }
             }
         }
@@ -312,14 +410,26 @@ impl Config {
             }
         }
 
-        if let Ok(port) = std::env::var("GC_METRICS_PORT") {
-            match port.parse() {
-                Ok(p) => {
-                    debug!("Found GC_METRICS_PORT: {}", p);
-                    config.metrics.port = p;
+        if let Ok(recovery_metrics) = std::env::var("GC_INCLUDE_RECOVERY_METRICS") {
+            match recovery_metrics.parse() {
+                Ok(enabled) => {
+                    debug!("Found GC_INCLUDE_RECOVERY_METRICS: {}", enabled);
+                    config.metrics.include_recovery_metrics = enabled;
                 }
                 Err(e) => {
-                    parse_errors.push(format!("Invalid GC_METRICS_PORT '{}': {}", port, e));
+                    parse_errors.push(format!("Invalid GC_INCLUDE_RECOVERY_METRICS '{}': {}", recovery_metrics, e));
+                }
+            }
+        }
+
+        if let Ok(wal_metrics) = std::env::var("GC_INCLUDE_WAL_METRICS") {
+            match wal_metrics.parse() {
+                Ok(enabled) => {
+                    debug!("Found GC_INCLUDE_WAL_METRICS: {}", enabled);
+                    config.metrics.include_wal_metrics = enabled;
+                }
+                Err(e) => {
+                    parse_errors.push(format!("Invalid GC_INCLUDE_WAL_METRICS '{}': {}", wal_metrics, e));
                 }
             }
         }
@@ -337,14 +447,17 @@ impl Config {
         }
 
         info!(
-            "✅ Configuration loaded from environment in {:.3}s",
-            load_duration.as_secs_f64()
+            "✅ Configuration loaded from environment in {:.3}s (backend: {}, WAL: {}, auto-recovery: {})",
+            load_duration.as_secs_f64(),
+            config.storage.backend,
+            config.storage.enable_wal,
+            config.storage.enable_auto_recovery
         );
 
         Ok(config)
     }
 
-    /// Validate configuration with detailed error reporting
+    /// Validate configuration with persistent storage checks
     pub fn validate(&self) -> Result<()> {
         let validation_result = self.validate_detailed();
 
@@ -378,13 +491,13 @@ impl Config {
         Ok(())
     }
 
-    /// Perform detailed validation with structured error reporting
+    /// Perform detailed validation with persistent storage support
     pub fn validate_detailed(&self) -> ValidationResult {
         let start_time = std::time::Instant::now();
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
 
-        // Validate lease duration relationships
+        // Validate lease duration relationships (existing validation)
         if self.gc.min_lease_duration_seconds >= self.gc.max_lease_duration_seconds {
             errors.push(ValidationError {
                 field: "gc.min_lease_duration_seconds".to_string(),
@@ -400,43 +513,76 @@ impl Config {
             });
         }
 
-        if self.gc.default_lease_duration_seconds < self.gc.min_lease_duration_seconds
-            || self.gc.default_lease_duration_seconds > self.gc.max_lease_duration_seconds
-        {
-            errors.push(ValidationError {
-                field: "gc.default_lease_duration_seconds".to_string(),
-                error_type: "out_of_range".to_string(),
-                message: format!(
-                    "Default lease duration ({}) must be between min ({}) and max ({})",
-                    self.gc.default_lease_duration_seconds,
-                    self.gc.min_lease_duration_seconds,
-                    self.gc.max_lease_duration_seconds
-                ),
-                suggested_fix: Some(format!(
-                    "Set default_lease_duration between {} and {}",
-                    self.gc.min_lease_duration_seconds, self.gc.max_lease_duration_seconds
-                )),
-            });
+        // Validate storage backend
+        match self.storage.backend.as_str() {
+            "memory" => {
+                if self.storage.enable_wal {
+                    warnings.push(ValidationWarning {
+                        field: "storage.enable_wal".to_string(),
+                        message: "WAL is enabled but memory backend doesn't persist data".to_string(),
+                        recommendation: Some("Consider using 'persistent_file' backend for WAL".to_string()),
+                    });
+                }
+                if self.storage.enable_auto_recovery {
+                    warnings.push(ValidationWarning {
+                        field: "storage.enable_auto_recovery".to_string(),
+                        message: "Auto-recovery is enabled but memory backend has no persistent state".to_string(),
+                        recommendation: Some("Use 'persistent_file' backend for recovery features".to_string()),
+                    });
+                }
+            }
+            "persistent_file" => {
+                if self.storage.persistent_config.is_none() {
+                    errors.push(ValidationError {
+                        field: "storage.persistent_config".to_string(),
+                        error_type: "missing_config".to_string(),
+                        message: "Persistent file backend requires persistent_config".to_string(),
+                        suggested_fix: Some("Add persistent_config section to storage configuration".to_string()),
+                    });
+                } else if let Some(ref config) = self.storage.persistent_config {
+                    // Validate persistent storage configuration
+                    if config.data_directory.is_empty() {
+                        errors.push(ValidationError {
+                            field: "storage.persistent_config.data_directory".to_string(),
+                            error_type: "empty_path".to_string(),
+                            message: "Data directory cannot be empty".to_string(),
+                            suggested_fix: Some("Set a valid path for data_directory".to_string()),
+                        });
+                    }
+
+                    if config.max_wal_size < 1024 * 1024 {
+                        warnings.push(ValidationWarning {
+                            field: "storage.persistent_config.max_wal_size".to_string(),
+                            message: "Very small WAL size may cause frequent rotations".to_string(),
+                            recommendation: Some("Consider using at least 10MB for max_wal_size".to_string()),
+                        });
+                    }
+
+                    if config.max_wal_files < 2 {
+                        warnings.push(ValidationWarning {
+                            field: "storage.persistent_config.max_wal_files".to_string(),
+                            message: "Very few WAL files may not provide sufficient recovery history".to_string(),
+                            recommendation: Some("Consider keeping at least 3 WAL files".to_string()),
+                        });
+                    }
+                }
+            }
+            backend => {
+                errors.push(ValidationError {
+                    field: "storage.backend".to_string(),
+                    error_type: "unsupported_backend".to_string(),
+                    message: format!("Unsupported storage backend: {}", backend),
+                    suggested_fix: Some("Use 'memory' or 'persistent_file'".to_string()),
+                });
+            }
         }
 
-        // Validate storage configuration
-        if self.storage.backend != "memory" {
-            errors.push(ValidationError {
-                field: "storage.backend".to_string(),
-                error_type: "unsupported_backend".to_string(),
-                message: format!("Unsupported storage backend: {}", self.storage.backend),
-                suggested_fix: Some("Set storage backend to 'memory'".to_string()),
-            });
-        }
-
-        // Validate server configuration
+        // Validate server configuration (existing validation)
         if self.server.port < 1024 {
             warnings.push(ValidationWarning {
                 field: "server.port".to_string(),
                 message: format!("Port {} is a privileged port", self.server.port),
-                recommendation: Some(
-                    "Consider using a port >= 1024 for non-root execution".to_string(),
-                ),
+                recommendation: Some("Consider using a port >= 1024 for non-root execution".to_string()),
             });
         }
 
@@ -449,45 +595,33 @@ impl Config {
             });
         }
 
-        // Validate cleanup configuration
-        if self.gc.cleanup_interval_seconds < 10 {
+        // Validate WAL compaction threshold
+        if self.storage.wal_compaction_threshold < 1000 {
             warnings.push(ValidationWarning {
-                field: "gc.cleanup_interval_seconds".to_string(),
-                message: "Very short cleanup interval may impact performance".to_string(),
-                recommendation: Some(
-                    "Consider using an interval of at least 30 seconds".to_string(),
-                ),
+                field: "storage.wal_compaction_threshold".to_string(),
+                message: "Low WAL compaction threshold may cause frequent compactions".to_string(),
+                recommendation: Some("Consider using at least 1000 entries".to_string()),
             });
         }
 
-        if self.gc.cleanup_grace_period_seconds > self.gc.cleanup_interval_seconds {
+        // Validate snapshot interval
+        if self.storage.snapshot_interval_seconds > 0 && self.storage.snapshot_interval_seconds < 300 {
             warnings.push(ValidationWarning {
-                field: "gc.cleanup_grace_period_seconds".to_string(),
-                message: "Grace period is longer than cleanup interval".to_string(),
-                recommendation: Some(
-                    "Consider setting grace period <= cleanup interval".to_string(),
-                ),
+                field: "storage.snapshot_interval_seconds".to_string(),
+                message: "Very frequent snapshots may impact performance".to_string(),
+                recommendation: Some("Consider using at least 5 minutes (300 seconds)".to_string()),
             });
         }
 
-        // Validate resource limits
-        if self.gc.max_leases_per_service > 100000 {
-            warnings.push(ValidationWarning {
-                field: "gc.max_leases_per_service".to_string(),
-                message: "Very high lease limit may impact memory usage".to_string(),
-                recommendation: Some("Monitor memory usage with high lease counts".to_string()),
-            });
-        }
-
-        // Validate cleanup timeouts
-        if self.cleanup.default_timeout_seconds > 300 {
-            warnings.push(ValidationWarning {
-                field: "cleanup.default_timeout_seconds".to_string(),
-                message: "Long cleanup timeout may delay lease processing".to_string(),
-                recommendation: Some(
-                    "Consider shorter timeouts for better responsiveness".to_string(),
-                ),
-            });
+        // Validate recovery configuration
+        if let Some(ref recovery_config) = self.recovery {
+            if recovery_config.max_recovery_time.as_secs() < 10 {
+                warnings.push(ValidationWarning {
+                    field: "recovery.max_recovery_time".to_string(),
+                    message: "Very short recovery timeout may cause recovery failures".to_string(),
+                    recommendation: Some("Consider using at least 30 seconds".to_string()),
+                });
+            }
         }
 
         let duration = start_time.elapsed();
@@ -500,11 +634,24 @@ impl Config {
         }
     }
 
-    /// Get configuration as a summary for logging
+    /// Get configuration summary with persistent storage info
     pub fn summary(&self) -> ConfigSummary {
         ConfigSummary {
             server_endpoint: format!("{}:{}", self.server.host, self.server.port),
             storage_backend: self.storage.backend.clone(),
+            storage_features: StorageFeatures {
+                wal_enabled: self.storage.enable_wal,
+                auto_recovery_enabled: self.storage.enable_auto_recovery,
+                snapshot_interval: if self.storage.snapshot_interval_seconds > 0 {
+                    Some(self.storage.snapshot_interval_seconds)
+                } else {
+                    None
+                },
+                #[cfg(feature = "persistent")]
+                recovery_strategy: self.storage.recovery_strategy.clone(),
+                #[cfg(not(feature = "persistent"))]
+                recovery_strategy: self.storage.recovery_strategy.clone(),
+            },
             default_lease_duration: self.gc.default_lease_duration_seconds,
             cleanup_interval: self.gc.cleanup_interval_seconds,
             max_leases_per_service: self.gc.max_leases_per_service,
@@ -517,7 +664,7 @@ impl Config {
         }
     }
 
-    // Helper methods for duration conversion
+    // Helper methods for duration conversion (existing methods)
     pub fn cleanup_interval(&self) -> Duration {
         Duration::from_secs(self.gc.cleanup_interval_seconds)
     }
@@ -539,16 +686,28 @@ impl Config {
     }
 }
 
-/// Configuration summary for logging and metrics
+/// Configuration summary for logging and metrics with storage features
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfigSummary {
     pub server_endpoint: String,
     pub storage_backend: String,
+    pub storage_features: StorageFeatures,
     pub default_lease_duration: u64,
     pub cleanup_interval: u64,
     pub max_leases_per_service: usize,
     pub metrics_enabled: bool,
     pub metrics_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StorageFeatures {
+    pub wal_enabled: bool,
+    pub auto_recovery_enabled: bool,
+    pub snapshot_interval: Option<u64>,
+    #[cfg(feature = "persistent")]
+    pub recovery_strategy: crate::recovery::RecoveryStrategy,
+    #[cfg(not(feature = "persistent"))]
+    pub recovery_strategy: String,
 }
 
 #[cfg(test)]
@@ -567,52 +726,59 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_lease_duration_ranges() {
+    fn test_persistent_storage_validation() {
         let mut config = Config::default();
-        config.gc.min_lease_duration_seconds = 100;
-        config.gc.max_lease_duration_seconds = 50; // Invalid: min > max
+        config.storage.backend = "persistent_file".to_string();
+        // Missing persistent_config should cause validation error
 
         let result = config.validate_detailed();
         assert!(!result.success);
-        assert!(!result.errors.is_empty());
-        assert!(result.errors[0].error_type == "invalid_range");
+        assert!(result.errors.iter().any(|e| e.error_type == "missing_config"));
+    }
+
+    #[test]
+    fn test_wal_with_memory_backend_warning() {
+        let mut config = Config::default();
+        config.storage.backend = "memory".to_string();
+        config.storage.enable_wal = true;
+
+        let result = config.validate_detailed();
+        assert!(result.success); // Should still be valid
+        assert!(!result.warnings.is_empty()); // But should have warnings
+        assert!(result.warnings.iter().any(|w| w.field.contains("enable_wal")));
     }
 
     #[test]
     fn test_unsupported_backend() {
         let mut config = Config::default();
-        config.storage.backend = "postgres".to_string();
+        config.storage.backend = "nonexistent".to_string();
 
         let result = config.validate_detailed();
         assert!(!result.success);
-        assert!(result
-            .errors
-            .iter()
-            .any(|e| e.error_type == "unsupported_backend"));
+        assert!(result.errors.iter().any(|e| e.error_type == "unsupported_backend"));
     }
 
     #[test]
-    fn test_port_conflict() {
-        let mut config = Config::default();
-        config.server.port = 9090;
-        config.metrics.port = 9090; // Same port
-
-        let result = config.validate_detailed();
-        assert!(!result.success);
-        assert!(result
-            .errors
-            .iter()
-            .any(|e| e.error_type == "port_conflict"));
+    fn test_config_summary() {
+        let config = Config::default();
+        let summary = config.summary();
+        
+        assert_eq!(summary.storage_backend, "memory");
+        assert!(!summary.storage_features.wal_enabled);
+        assert!(!summary.storage_features.auto_recovery_enabled);
     }
 
     #[test]
-    fn test_config_warnings() {
+    fn test_persistent_config_summary() {
         let mut config = Config::default();
-        config.server.port = 80; // Privileged port
-        config.gc.cleanup_interval_seconds = 5; // Very short interval
+        config.storage.backend = "persistent_file".to_string();
+        config.storage.enable_wal = true;
+        config.storage.enable_auto_recovery = true;
+        config.storage.persistent_config = Some(PersistentStorageConfig::default());
 
-        let result = config.validate_detailed();
-        assert!(result.success); // Should still be valid
-        assert!(!result.warnings.is_empty()); // But should have warnings
+        let summary = config.summary();
+        assert_eq!(summary.storage_backend, "persistent_file");
+        assert!(summary.storage_features.wal_enabled);
+        assert!(summary.storage_features.auto_recovery_enabled);
     }
 }

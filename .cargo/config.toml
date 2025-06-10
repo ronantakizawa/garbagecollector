@@ -1,5 +1,0 @@
-# .cargo/config.toml - Project-specific Cargo configuration
-
-[env]
-# Disable SQLx compile-time checking to avoid DATABASE_URL requirement during build
-SQLX_OFFLINE = "true"

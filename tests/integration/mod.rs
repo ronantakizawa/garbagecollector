@@ -19,7 +19,6 @@ pub mod service;
 pub mod storage;
 
 // Remove this line since we don't have database tests yet:
-// #[cfg(feature = "postgres")]
 // pub mod database;
 
 pub mod cross_backend;
@@ -169,20 +168,6 @@ async fn test_suite_summary() -> anyhow::Result<()> {
     println!("   • Storage factory pattern");
     println!("");
 
-    #[cfg(feature = "postgres")]
-    {
-        println!("✅ PostgreSQL Tests:");
-        println!("   • Basic CRUD operations");
-        println!("   • Advanced queries and filtering");
-        println!("   • Concurrent operations");
-        println!("   • Schema integrity");
-        println!("   • Database triggers");
-        println!("   • Database functions");
-        println!("   • Performance indexes");
-        println!("   • Constraints and validation");
-        println!("");
-    }
-
     println!("✅ gRPC Service Tests:");
     println!("   • Health check");
     println!("   • Lease CRUD operations via gRPC");
@@ -208,7 +193,6 @@ async fn test_suite_summary() -> anyhow::Result<()> {
     println!("");
 
     println!("🎯 To run all tests:");
-    println!("   cargo test --features postgres  # Full test suite");
     println!("   cargo test                      # Memory-only tests");
     println!("   make test-integration           # Integration tests");
 
