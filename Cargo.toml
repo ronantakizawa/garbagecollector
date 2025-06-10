@@ -10,7 +10,7 @@ homepage = "https://github.com/ronantakizawa/garbagetruck"
 repository = "https://github.com/ronantakizawa/garbagetruck" 
 documentation = "https://docs.rs/garbagetruck"
 keywords = ["distributedsystems", "garbagecollection", "sidecar", "microservices", "lease"]
-categories = ["network-programming", "development-tools", "distributed-systems"]
+categories = ["network-programming", "development-tools", "command-line-utilities"]
 exclude = [
     "target/",
     ".git/",
