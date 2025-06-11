@@ -79,6 +79,29 @@ garbagetruck lease create --object-id "user-session" --object-type websocket-ses
 garbagetruck lease list --limit 20
 ```
 
+## Run with mTLS
+
+### 1. Create Certificates
+```bash
+cargo run --bin garbagetruck-cert-gen --features tls
+```
+### 2. Copy Environment Variables
+```bash
+export GC_MTLS_ENABLED=true
+export GC_MTLS_SERVER_CERT=./certs/server.crt
+export GC_MTLS_SERVER_KEY=./certs/server.key
+export GC_MTLS_CA_CERT=./certs/ca.crt
+export GC_MTLS_CLIENT_CERT=./certs/client.crt
+export GC_MTLS_CLIENT_KEY=./certs/client.key
+export GC_MTLS_REQUIRE_CLIENT_AUTH=true
+export GC_MTLS_ALLOWED_CLIENT_CNS=garbagetruck-client
+```
+
+### 3. Start Server with mTLS
+```bash
+cargo run --bin garbagetruck-server --features "server,tls"
+```
+
 ## gRPC Functionality Testing 
 
 

@@ -32,8 +32,8 @@ name = "garbagetruck"
 path = "src/lib.rs"
 
 [dependencies]
-# gRPC and protobuf
-tonic = { version = "0.12", features = ["transport"] }
+# gRPC and protobuf with TLS support
+tonic = { version = "0.12", features = ["transport", "tls"] }
 prost = "0.13"
 prost-types = "0.13"
 tokio = { version = "1.0", features = ["full", "macros"] }
@@ -87,6 +87,11 @@ flate2 = "1.0"          # Compression for snapshots
 md5 = "0.7"             # Checksums for integrity verification
 tempfile = "3.8"        # Temporary directories for testing and examples
 
+# Security dependencies for mTLS
+rustls = { version = "0.21", optional = true }
+rustls-pemfile = { version = "1.0", optional = true }
+tokio-rustls = { version = "0.24", optional = true }
+
 [dev-dependencies]
 # Testing framework
 tokio-test = "0.4"
@@ -103,11 +108,12 @@ criterion = { version = "0.5", features = ["html_reports"] }
 tonic-build = "0.12"
 
 [features]
-default = ["client", "server", "persistent"]
+default = ["client", "server", "persistent", "tls"]
 client = ["clap"]
-server = []
+server = ["tls"]
 persistent = []  # Enable persistent storage features
-full = ["client", "server", "persistent"]
+tls = ["rustls", "rustls-pemfile", "tokio-rustls"]  # Enable TLS/mTLS features
+full = ["client", "server", "persistent", "tls"]
 
 # Server binary
 [[bin]]
@@ -132,6 +138,12 @@ required-features = ["client"]
 name = "garbagetruck-cleanup-server"
 path = "src/bin/cleanup-server/main.rs"
 required-features = ["client"]
+
+# Certificate generation binary
+[[bin]]
+name = "garbagetruck-cert-gen"
+path = "src/bin/cert-gen/main.rs"
+required-features = ["tls"]
 
 [[bench]]
 name = "benchmark"

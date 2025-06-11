@@ -8,6 +8,7 @@ pub mod metrics;
 pub mod service;
 pub mod shutdown;
 pub mod storage;
+pub mod security;
 
 // Startup and dependencies modules
 pub mod dependencies;

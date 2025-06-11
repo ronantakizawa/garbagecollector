@@ -1,7 +1,7 @@
-// src/bin/server/main.rs - Fixed server main with proper backend handling
+// src/bin/server/main.rs - Fixed server main with proper backend and TLS handling
 
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use garbagetruck::{Config, GCService, Metrics};
 
 #[tokio::main]
@@ -31,6 +31,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Check TLS configuration
+    #[cfg(not(feature = "tls"))]
+    {
+        if config.security.mtls.enabled {
+            warn!("⚠️ mTLS requested but TLS feature not enabled, disabling mTLS");
+            config.security.mtls.enabled = false;
+        }
+    }
+
     // Validate configuration
     if let Err(e) = config.validate() {
         error!("❌ Configuration validation failed: {}", e);
@@ -44,6 +53,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("   - Storage backend: {}", summary.storage_backend);
     info!("   - WAL enabled: {}", summary.storage_features.wal_enabled);
     info!("   - Auto-recovery: {}", summary.storage_features.auto_recovery_enabled);
+    info!("   - mTLS enabled: {}", summary.security_features.mtls_enabled);
+    info!("   - Enhanced security: {}", summary.security_features.enhanced_security);
     info!("   - Metrics enabled: {}", summary.metrics_enabled);
 
     let config = Arc::new(config);
@@ -75,6 +86,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 garbagetruck::GCError::Configuration(ref msg) if msg.contains("persistent") => {
                     error!("💡 Hint: To use persistent storage, compile with: cargo run --bin garbagetruck-server --features persistent");
                     error!("💡 Or set GC_STORAGE_BACKEND=memory to use memory storage");
+                }
+                garbagetruck::GCError::Configuration(ref msg) if msg.contains("TLS") => {
+                    error!("💡 Hint: To use mTLS, compile with: cargo run --bin garbagetruck-server --features tls");
+                    error!("💡 Or set GC_MTLS_ENABLED=false to disable mTLS");
                 }
                 _ => {}
             }
