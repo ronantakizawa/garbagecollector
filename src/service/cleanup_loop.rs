@@ -1,8 +1,9 @@
-// src/service/cleanup_loop.rs - Fixed cleanup loop that actually executes cleanup
+// src/service/cleanup_loop.rs - Dedicated cleanup loop management
 
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::{interval, sleep};
+use tokio::time::interval;
+use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use crate::cleanup::CleanupExecutor;
@@ -12,15 +13,16 @@ use crate::lease::{Lease, LeaseState};
 use crate::metrics::Metrics;
 use crate::storage::Storage;
 
-/// Background cleanup loop that processes expired leases
-pub struct CleanupLoop {
+/// Manages the background cleanup loop
+pub struct CleanupLoopManager {
     storage: Arc<dyn Storage>,
-    cleanup_executor: CleanupExecutor,
     config: Arc<Config>,
     metrics: Arc<Metrics>,
+    cleanup_executor: CleanupExecutor,
+    task_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
-impl CleanupLoop {
+impl CleanupLoopManager {
     pub fn new(
         storage: Arc<dyn Storage>,
         config: Arc<Config>,
@@ -34,168 +36,312 @@ impl CleanupLoop {
 
         Self {
             storage,
-            cleanup_executor,
             config,
             metrics,
+            cleanup_executor,
+            task_handle: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// Start the cleanup loop
-    pub async fn start(&self) -> Result<()> {
-        let mut cleanup_interval = interval(self.config.cleanup_interval());
-        let grace_period = self.config.cleanup_grace_period();
+    /// Start the cleanup loop in the background
+    pub async fn start(&self, shutdown_tx: Option<Arc<tokio::sync::broadcast::Sender<()>>>) {
+        let storage = self.storage.clone();
+        let config = self.config.clone();
+        let metrics = self.metrics.clone();
+        let cleanup_executor = self.cleanup_executor.clone();
+        let mut shutdown_rx = shutdown_tx.as_ref().map(|tx| tx.subscribe());
 
-        info!(
-            "🧹 Starting cleanup loop (interval: {}s, grace: {}s)",
-            self.config.gc.cleanup_interval_seconds,
-            self.config.gc.cleanup_grace_period_seconds
-        );
+        let task_handle = tokio::spawn(async move {
+            let mut cleanup_interval =
+                interval(Duration::from_secs(config.gc.cleanup_interval_seconds));
 
-        loop {
-            cleanup_interval.tick().await;
-
-            if let Err(e) = self.run_cleanup_cycle(grace_period).await {
-                error!("Cleanup cycle failed: {}", e);
-                self.metrics.increment_cleanup_errors();
-                
-                // Don't exit the loop, just log and continue
-                warn!("Cleanup cycle failed, continuing with next cycle...");
-                sleep(Duration::from_secs(5)).await; // Brief pause before retry
-            }
-        }
-    }
-
-    async fn run_cleanup_cycle(&self, grace_period: Duration) -> Result<()> {
-        debug!("🔍 Starting cleanup cycle");
-
-        // Step 1: Mark expired leases
-        let expired_count = self.mark_expired_leases().await?;
-        if expired_count > 0 {
-            info!("⏰ Marked {} leases as expired", expired_count);
-        }
-
-        // Step 2: Get leases that need cleanup (expired + past grace period)
-        let leases_to_cleanup = self.get_leases_needing_cleanup(grace_period).await?;
-        
-        if leases_to_cleanup.is_empty() {
-            debug!("✨ No leases need cleanup this cycle");
-            return Ok(());
-        }
-
-        info!("🧹 Found {} leases needing cleanup", leases_to_cleanup.len());
-
-        // Step 3: Execute cleanup for each lease
-        let cleanup_results = self.cleanup_executor.cleanup_batch(leases_to_cleanup.clone()).await;
-
-        // Step 4: Process cleanup results
-        let mut successful_cleanups = 0;
-        let mut failed_cleanups = 0;
-
-        for (lease, result) in leases_to_cleanup.iter().zip(cleanup_results.iter()) {
-            if result.success {
-                // Mark lease as cleaned up in storage
-                if let Err(e) = self.storage.delete_lease(&lease.lease_id).await {
-                    warn!("Failed to delete lease {} from storage: {}", lease.lease_id, e);
-                } else {
-                    debug!("✅ Deleted lease {} from storage", lease.lease_id);
-                }
-                successful_cleanups += 1;
-                self.metrics.increment_successful_cleanups();
-            } else {
-                warn!(
-                    "❌ Cleanup failed for lease {} ({}): {:?}",
-                    lease.lease_id, lease.object_id, result.error
-                );
-                failed_cleanups += 1;
-                self.metrics.increment_failed_cleanups();
-            }
-        }
-
-        if successful_cleanups > 0 || failed_cleanups > 0 {
             info!(
-                "📊 Cleanup cycle completed: {} successful, {} failed",
-                successful_cleanups, failed_cleanups
+                "🧹 Starting cleanup loop (interval: {}s, grace: {}s)",
+                config.gc.cleanup_interval_seconds, config.gc.cleanup_grace_period_seconds
             );
-        }
 
-        // Step 5: Update metrics
-        self.metrics.record_cleanup_cycle(successful_cleanups, failed_cleanups);
-
-        Ok(())
-    }
-
-    async fn mark_expired_leases(&self) -> Result<usize> {
-        // Get all leases and filter for active ones that are expired
-        let all_leases = self.storage.list_leases(None, Some(1000)).await?;
-        let mut expired_count = 0;
-
-        for lease in all_leases {
-            if lease.state == LeaseState::Active && lease.is_expired() {
-                // Update the lease to expired state
-                let mut expired_lease = lease.clone();
-                expired_lease.expire();
-                
-                if let Err(e) = self.storage.update_lease(&expired_lease).await {
-                    warn!("Failed to mark lease {} as expired: {}", lease.lease_id, e);
-                } else {
-                    debug!("⏰ Marked lease {} as expired", lease.lease_id);
-                    expired_count += 1;
-                }
-            }
-        }
-
-        Ok(expired_count)
-    }
-
-    async fn get_leases_needing_cleanup(&self, grace_period: Duration) -> Result<Vec<Lease>> {
-        // Get all leases and filter for expired ones that need cleanup
-        let all_leases = self.storage.list_leases(None, Some(1000)).await?;
-        let mut leases_to_cleanup = Vec::new();
-
-        for lease in all_leases {
-            if lease.state == LeaseState::Expired {
-                // Check if the lease has passed the grace period and has cleanup config
-                if lease.should_cleanup(grace_period) && lease.cleanup_config.is_some() {
-                    debug!(
-                        "🎯 Lease {} needs cleanup (expired: {}, grace passed: {})",
-                        lease.lease_id,
-                        lease.is_expired(),
-                        lease.should_cleanup(grace_period)
-                    );
-                    leases_to_cleanup.push(lease);
-                } else if lease.should_cleanup(grace_period) && lease.cleanup_config.is_none() {
-                    // No cleanup config, just delete from storage
-                    debug!(
-                        "🗑️ Lease {} has no cleanup config, removing from storage",
-                        lease.lease_id
-                    );
-                    if let Err(e) = self.storage.delete_lease(&lease.lease_id).await {
-                        warn!("Failed to delete lease {} from storage: {}", lease.lease_id, e);
+            loop {
+                tokio::select! {
+                    _ = cleanup_interval.tick() => {
+                        // Run cleanup cycle
+                        match run_cleanup_cycle(&storage, &cleanup_executor, &config, &metrics).await {
+                            Ok((expired, cleaned)) => {
+                                if expired > 0 || cleaned > 0 {
+                                    info!("🧹 Cleanup cycle completed: {} expired, {} cleaned", expired, cleaned);
+                                } else {
+                                    debug!("✨ Cleanup cycle completed: no action needed");
+                                }
+                            }
+                            Err(e) => {
+                                error!("❌ Cleanup cycle failed: {}", e);
+                                metrics.increment_cleanup_failures();
+                                // Don't exit the loop, just continue with next cycle
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                            }
+                        }
+                    }
+                    _ = async {
+                        if let Some(ref mut rx) = shutdown_rx {
+                            let _ = rx.recv().await;
+                        } else {
+                            // If no shutdown receiver, wait forever
+                            std::future::pending::<()>().await;
+                        }
+                    } => {
+                        info!("🛑 Cleanup loop received shutdown signal");
+                        break;
                     }
                 }
             }
-        }
 
-        Ok(leases_to_cleanup)
+            info!("🧹 Cleanup loop stopped");
+        });
+
+        *self.task_handle.lock().await = Some(task_handle);
+        info!("✅ Cleanup loop started in background");
+    }
+
+    /// Stop the cleanup loop
+    pub async fn stop(&self) {
+        let mut handle_guard = self.task_handle.lock().await;
+        if let Some(handle) = handle_guard.take() {
+            handle.abort();
+            info!("🛑 Cleanup loop stopped");
+        }
+    }
+
+    /// Check if the cleanup loop is running
+    pub async fn is_running(&self) -> bool {
+        let handle_guard = self.task_handle.lock().await;
+        handle_guard.as_ref().map_or(false, |h| !h.is_finished())
+    }
+
+    /// Get cleanup statistics
+    pub async fn get_stats(&self) -> CleanupStats {
+        // This would be populated from metrics in a real implementation
+        CleanupStats {
+            total_cycles: 0,
+            successful_cycles: 0,
+            failed_cycles: 0,
+            total_leases_cleaned: 0,
+            last_cycle_duration: Duration::ZERO,
+        }
     }
 }
 
-// Add these methods to the Metrics struct if they don't exist
-impl crate::metrics::Metrics {
-    pub fn increment_cleanup_errors(&self) {
-        // Implementation depends on your metrics structure
-        // This is a placeholder - adjust based on your actual Metrics implementation
+/// Run a single cleanup cycle
+async fn run_cleanup_cycle(
+    storage: &Arc<dyn Storage>,
+    cleanup_executor: &CleanupExecutor,
+    config: &Config,
+    metrics: &Arc<Metrics>,
+) -> Result<(usize, usize)> {
+    debug!("🔍 Starting cleanup cycle");
+
+    // Get all leases
+    let all_leases = storage.list_leases(None, Some(1000)).await?;
+    let grace_period = Duration::from_secs(config.gc.cleanup_grace_period_seconds);
+
+    let mut expired_count = 0;
+    let mut cleanup_candidates = Vec::new();
+
+    // Process each lease
+    for mut lease in all_leases {
+        match lease.state {
+            LeaseState::Active if lease.is_expired() => {
+                // Mark as expired
+                lease.expire();
+
+                // Store lease info before the storage call
+                let lease_id = lease.lease_id.clone();
+                let object_id = lease.object_id.clone();
+
+                if let Err(e) = storage.update_lease(lease).await {
+                    warn!("Failed to update expired lease {}: {}", lease_id, e);
+                } else {
+                    expired_count += 1;
+                    debug!(
+                        "⏰ Marked lease {} as expired (object: {})",
+                        lease_id, object_id
+                    );
+                }
+            }
+            LeaseState::Expired => {
+                // Check if needs cleanup
+                if lease.should_cleanup(grace_period) {
+                    if lease.cleanup_config.is_some() {
+                        debug!(
+                            "🎯 Lease {} needs cleanup (object: {}, expired: {:?} ago)",
+                            lease.lease_id,
+                            lease.object_id,
+                            lease.time_until_expiry()
+                        );
+                        cleanup_candidates.push(lease);
+                    } else {
+                        // No cleanup config, just remove from storage
+                        debug!(
+                            "🗑️ Lease {} has no cleanup config, removing from storage",
+                            lease.lease_id
+                        );
+                        if let Err(e) = storage.delete_lease(&lease.lease_id).await {
+                            warn!(
+                                "Failed to delete lease {} from storage: {}",
+                                lease.lease_id, e
+                            );
+                        }
+                    }
+                }
+            }
+            LeaseState::Released => {
+                // Released leases with cleanup config should be cleaned immediately
+                if lease.cleanup_config.is_some() {
+                    debug!(
+                        "🎯 Released lease {} needs immediate cleanup (object: {})",
+                        lease.lease_id, lease.object_id
+                    );
+                    cleanup_candidates.push(lease);
+                } else {
+                    // No cleanup config, just remove from storage
+                    if let Err(e) = storage.delete_lease(&lease.lease_id).await {
+                        warn!(
+                            "Failed to delete released lease {} from storage: {}",
+                            lease.lease_id, e
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
-    pub fn increment_successful_cleanups(&self) {
-        // Implementation depends on your metrics structure
+    if cleanup_candidates.is_empty() {
+        if expired_count > 0 {
+            debug!(
+                "⏰ Marked {} leases as expired, no cleanup needed this cycle",
+                expired_count
+            );
+        }
+        return Ok((expired_count, 0));
     }
 
-    pub fn increment_failed_cleanups(&self) {
-        // Implementation depends on your metrics structure
+    info!(
+        "🧹 Processing {} cleanup candidates",
+        cleanup_candidates.len()
+    );
+
+    // Execute cleanup
+    let cleanup_results = cleanup_executor
+        .cleanup_batch(cleanup_candidates.clone())
+        .await;
+
+    let mut successful_cleanups = 0;
+    let mut failed_cleanups = 0;
+
+    // Process cleanup results
+    for (lease, result) in cleanup_candidates.iter().zip(cleanup_results.iter()) {
+        if result.success {
+            // Remove lease from storage after successful cleanup
+            if let Err(e) = storage.delete_lease(&lease.lease_id).await {
+                warn!("Failed to delete cleaned lease {}: {}", lease.lease_id, e);
+            } else {
+                successful_cleanups += 1;
+                info!(
+                    "✅ Successfully cleaned up lease {} (object: {})",
+                    lease.lease_id, lease.object_id
+                );
+                metrics.increment_successful_cleanups();
+            }
+        } else {
+            failed_cleanups += 1;
+            error!(
+                "❌ Cleanup failed for lease {} (object: {}): {:?}",
+                lease.lease_id, lease.object_id, result.error
+            );
+            metrics.increment_cleanup_failures();
+        }
     }
 
-    pub fn record_cleanup_cycle(&self, _successful: usize, _failed: usize) {
-        // Implementation depends on your metrics structure
+    if failed_cleanups > 0 {
+        warn!("⚠️ {} cleanups failed this cycle", failed_cleanups);
+    }
+
+    Ok((expired_count, successful_cleanups))
+}
+
+/// Cleanup statistics
+#[derive(Debug, Clone)]
+pub struct CleanupStats {
+    pub total_cycles: u64,
+    pub successful_cycles: u64,
+    pub failed_cycles: u64,
+    pub total_leases_cleaned: u64,
+    pub last_cycle_duration: Duration,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::MemoryStorage;
+    use crate::lease::{ObjectType, Lease};
+    use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn test_cleanup_loop_manager_creation() {
+        let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+        let config = Arc::new(Config::default());
+        let metrics = Metrics::new();
+
+        let manager = CleanupLoopManager::new(storage, config, metrics);
+        assert!(!manager.is_running().await);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_cycle_with_no_leases() {
+        let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+        let config = Arc::new(Config::default());
+        let metrics = Metrics::new();
+        let cleanup_executor = CleanupExecutor::new(
+            Duration::from_secs(30),
+            3,
+            Duration::from_secs(5),
+        );
+
+        let result = run_cleanup_cycle(&storage, &cleanup_executor, &config, &metrics).await;
+        assert!(result.is_ok());
+        let (expired, cleaned) = result.unwrap();
+        assert_eq!(expired, 0);
+        assert_eq!(cleaned, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_cycle_with_expired_lease() {
+        let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+        let config = Arc::new(Config::default());
+        let metrics = Metrics::new();
+        let cleanup_executor = CleanupExecutor::new(
+            Duration::from_secs(30),
+            3,
+            Duration::from_secs(5),
+        );
+
+        // Create an expired lease
+        let mut lease = Lease::new(
+            "test-object".to_string(),
+            ObjectType::TemporaryFile,
+            "test-service".to_string(),
+            Duration::from_millis(1), // Very short duration
+            HashMap::new(),
+            None,
+        );
+        
+        storage.create_lease(lease.clone()).await.unwrap();
+        
+        // Wait for it to expire
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let result = run_cleanup_cycle(&storage, &cleanup_executor, &config, &metrics).await;
+        assert!(result.is_ok());
+        let (expired, _cleaned) = result.unwrap();
+        assert_eq!(expired, 1);
     }
 }
