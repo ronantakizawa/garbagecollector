@@ -16,17 +16,33 @@
 - **mod.rs** – Core service struct, business logic, and cleanup loop management  
 - **handlers.rs** – gRPC method implementations and request/response handling  
 - **validation.rs** – Request validation logic and input sanitization  
+- **cleanup_loop.rs** – Dedicated cleanup loop management for expired lease processing
+- **background_tasks.rs** – Background task management (WAL compaction, snapshots, health checks)
+- **grpc_server.rs** – Enhanced gRPC server with mTLS support and security features
+- **metrics_server.rs** – Dedicated metrics HTTP server with Prometheus export
+- **recovery_integration.rs** – Recovery system integration with main service lifecycle
 
 ### 💾 Storage Module (`src/storage/`)
 - **mod.rs** – Storage trait definitions, factory function, and shared types  
 - **memory.rs** – In-memory storage implementation using DashMap for development/testing  
-- **postgres.rs** – PostgreSQL storage implementation with connection pooling for production  
 
 ### 📊 Metrics Module (`src/metrics/`)
 - **mod.rs** – Core Prometheus metrics definitions and main `Metrics` struct  
-- **alerting.rs** – Alert management system with thresholds and notification logic  
 - **interceptors.rs** – gRPC interceptors for automatic request/response metrics collection  
-- **monitoring.rs** – Background monitoring tasks and extended metric implementations 
+
+### 🔄 Recovery Module (`src/recovery/`)
+- **mod.rs** –  Recovery module declarations and re-exports
+- **manager.rs** – Complete service failure recovery, state restoration, and recovery orchestration
+
+### 🔄 Cleanup Module (`src/cleanup/`)
+- **mod.rs** – Cleanup orchestration and management
+- **http_handler.rs** – HTTP-based cleanup endpoint handler for external cleanup operations
+
+### 🔒 Security Module (`src/security/`)
+- **mod.rs** – mTLS configuration and certificate management core
+- **certificates.rs** – Certificate generation and management utilities for development and production
+- **tls_config.rs** – TLS configuration implementation for gRPC server and client
+- **tls_fallback.rs** – Fallback TLS types when TLS feature is disabled
 
 ## 🧪 Test File Structure Overview
 
@@ -56,8 +72,7 @@
 ### 💾 Storage Integration Tests (`tests/integration/storage/`)
 
 - **`mod.rs`** – Storage test utilities, common interface tests, and backend factory testing  
-- **`memory.rs`** – In-memory storage implementation tests (CRUD, filtering, statistics, cleanup)  
-- **`postgres.rs`** – PostgreSQL storage tests (advanced queries, concurrent operations, performance)  
+- **`memory.rs`** – In-memory storage implementation tests (CRUD, filtering, statistics, cleanup)   
 - **`factory.rs`** – Storage factory pattern tests and backend selection validation  
 
 ---
@@ -83,18 +98,10 @@
 ### 🔗 Cross-Backend Tests (`tests/integration/cross_backend/`)
 
 - **`mod.rs`** – Cross-backend consistency tests and storage behavior validation across different backends  
-- **`consistency.rs`** – Data consistency verification tests ensuring identical behavior between memory and PostgreSQL storage  
+- **`consistency.rs`** – Data consistency verification tests ensuring identical behavior between memory
 
 ---
 
-### 🗄️ Database-Specific Tests (`tests/integration/database/`)  
-*Note: These tests are conditionally compiled with the `postgres` feature*
-
-- **`mod.rs`** – Database test utilities and PostgreSQL-specific testing infrastructure  
-- **`schema.rs`** – Database schema integrity tests (table structure, constraints, indexes)  
-- **`triggers.rs`** – Database trigger functionality tests (automatic statistics updates, state transitions)  
-- **`functions.rs`** – Database function tests (stored procedures, statistics calculations, cleanup operations)  
-- **`performance.rs`** – Database performance and indexing tests (query optimization, concurrent access)
 
 ## 🏗️ Architecture
 
